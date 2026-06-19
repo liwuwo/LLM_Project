@@ -1,7 +1,7 @@
 import gradio as gr
 import os
 import base64
-from llms import deepseek_llm,local_llm
+from llm.llms import deepseek_llm
 
 currentLLM = deepseek_llm
 
