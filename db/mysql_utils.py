@@ -261,40 +261,5 @@ class MysqlDataBaseManager:
 if __name__ == '__main__':
     db = MysqlDataBaseManager(DATABASE_URL)
 
-    # 测试1: SQL校验 - 合法的SELECT语句
-    print("=" * 50)
-    print("测试1: 校验合法的SELECT语句")
-    valid_sql = "SELECT * FROM users WHERE id = 1"
-    result = db.validate_sql(valid_sql)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    
-    # 测试2: SQL校验 - 危险的DELETE语句
-    print("\n" + "=" * 50)
-    print("测试2: 校验危险的DELETE语句")
-    dangerous_sql = "DELETE FROM users WHERE id = 1"
-    result = db.validate_sql(dangerous_sql)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    
-    # 测试3: 安全执行查询
-    print("\n" + "=" * 50)
-    print("测试3: 安全执行查询")
-    try:
-        query_sql = "SELECT * FROM cashiers LIMIT 5"
-        rows = db.execute_safe_query(query_sql)
-        print(f"查询结果: {len(rows)} 条记录")
-        for row in rows:
-            print(row)
-    except Exception as e:
-        print(f"查询失败: {e}")
-    
-    # 测试4: 参数化查询(防止SQL注入)
-    print("\n" + "=" * 50)
-    print("测试4: 参数化查询")
-    try:
-        param_sql = "SELECT * FROM cashiers WHERE id > :min_id LIMIT :limit_count"
-        rows = db.execute_safe_query(param_sql, {'min_id': 0, 'limit_count': 3})
-        print(f"查询结果: {len(rows)} 条记录")
-        for row in rows:
-            print(row)
-    except Exception as e:
-        print(f"查询失败: {e}")
+    print(db.get_alltables_comments())
+
