@@ -34,6 +34,7 @@ class queryDBTables(BaseTool):
 
 
 if __name__ == '__main__':
+
     from db.config import DATABASE_URL
 
     db_manager = MysqlDataBaseManager(DATABASE_URL)
