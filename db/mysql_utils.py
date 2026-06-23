@@ -50,80 +50,107 @@ class MysqlDataBaseManager:
             logger.exception(f"Error: {e}")
             raise ValueError(f"Failed to get table comments: {str(e)}")
 
-    def get_table_constructions(self, table_name: Optional[list[str]] = None) -> str:
+    def get_table_constructions(self, table_name: Optional[object] = None) -> str:
         """
-        获取table_name中指定的表的构造语句，如果不传，默认返回所有表的构造语句
-        :param table_name: list[str] 表名列表
-        :return: JSON格式的字符串，包含表结构信息
+        获取 table_name 中指定的表的结构信息。
+        :param table_name: 支持以下输入：
+            - None 或省略  -> 返回数据库中所有表的结构
+            - 单个字符串   -> 视为单个表名
+            - 字符串列表/元组/集合 -> 视为多个表名
+        :return: JSON 格式的字符串，包含表结构信息
         """
         try:
             inspector = inspect(self.engine)
+            all_db_tables = set(inspector.get_table_names())
 
-            # 如果未指定表名，获取所有表
+            # 规范化输入：统一成 [str] 列表，None 表示所有表
             if table_name is None:
-                table_name = inspector.get_table_names()
+                target_tables: Optional[list[str]] = None
+            elif isinstance(table_name, str):
+                stripped = table_name.strip()
+                target_tables = [stripped] if stripped else None
+            elif isinstance(table_name, (list, tuple, set)):
+                cleaned = [t.strip() for t in table_name if isinstance(t, str) and t.strip()]
+                target_tables = cleaned if cleaned else None
+            else:
+                logger.warning(f"get_table_constructions: 未知的 table_name 类型 {type(table_name)!r}，将返回所有表")
+                target_tables = None
 
-            tables_info = {}
-            for tbl_name in table_name:
-                # 验证表是否存在
-                if tbl_name not in inspector.get_table_names():
-                    logger.warning(f"Table '{tbl_name}' does not exist")
-                    continue
+            # 确定要查询的表
+            existing_tables: list[str] = []
+            missing_tables: list[str] = []
+            if target_tables is None:
+                existing_tables = list(all_db_tables)
+            else:
+                for t in target_tables:
+                    if t in all_db_tables:
+                        existing_tables.append(t)
+                    else:
+                        missing_tables.append(t)
+                if missing_tables:
+                    logger.warning(f"以下表不存在于数据库中，将被忽略：{missing_tables}")
 
-                # 只读方式获取表结构信息
+            tables_info: dict[str, dict] = {}
+            for tbl_name in existing_tables:
                 columns_info = []
                 for column in inspector.get_columns(tbl_name):
                     columns_info.append({
                         'name': column['name'],
                         'type': str(column['type']),
                         'nullable': column.get('nullable', True),
-                        'default': str(column.get('default')) if column.get('default') else None,
-                        'comment': column.get('comment', '')
+                        'default': str(column.get('default')) if column.get('default') is not None else None,
+                        'comment': column.get('comment', '') or '',
                     })
 
-                # 获取主键信息
                 pk_constraint = inspector.get_pk_constraint(tbl_name)
-                primary_keys = pk_constraint.get('constrained_columns', [])
+                primary_keys = (
+                    pk_constraint.get('constrained_columns', [])
+                    if pk_constraint and isinstance(pk_constraint, dict)
+                    else []
+                )
 
-                # 获取外键信息
                 foreign_keys = []
                 for fk in inspector.get_foreign_keys(tbl_name):
+                    if not isinstance(fk, dict):
+                        continue
                     foreign_keys.append({
                         'name': fk.get('name'),
                         'constrained_columns': fk.get('constrained_columns', []),
                         'referred_table': fk.get('referred_table'),
-                        'referred_columns': fk.get('referred_columns', [])
+                        'referred_columns': fk.get('referred_columns', []),
                     })
 
-                # 获取索引信息
                 indexes = []
                 for idx in inspector.get_indexes(tbl_name):
+                    if not isinstance(idx, dict):
+                        continue
                     indexes.append({
                         'name': idx.get('name'),
                         'column_names': idx.get('column_names', []),
-                        'unique': idx.get('unique', False)
+                        'unique': idx.get('unique', False),
                     })
 
-                # 获取表注释
                 table_comment_obj = inspector.get_table_comment(tbl_name)
-                table_comment = table_comment_obj.get('text', '') if table_comment_obj else ''
+                table_comment = ''
+                if isinstance(table_comment_obj, dict):
+                    table_comment = table_comment_obj.get('text', '') or ''
+                else:
+                    table_comment = getattr(table_comment_obj, 'text', '') or ''
 
-                # 组装表信息
                 tables_info[tbl_name] = {
                     'table_name': tbl_name,
                     'comment': table_comment,
                     'columns': columns_info,
                     'primary_keys': primary_keys,
                     'foreign_keys': foreign_keys,
-                    'indexes': indexes
+                    'indexes': indexes,
                 }
 
-            # 返回JSON格式字符串
             return json.dumps(tables_info, ensure_ascii=False, indent=2)
 
         except SQLAlchemyError as e:
             logger.exception(f"Error getting table constructions: {e}")
-            raise ValueError(f"Failed to get table constructions: {str(e)}")
+            return json.dumps({}, ensure_ascii=False)
 
     def validate_sql(self, sql: str) -> dict:
         """
