@@ -7,6 +7,101 @@ from db.mysql_utils import MysqlDataBaseManager
 from utils.logUtils import logger
 
 
+def normalize_sql_input(sql):
+    """
+    统一处理 LLM 可能输出的"嵌套 JSON"形式参数。
+    典型场景：LLM 已经按 JSON 写好 {"sql": "SELECT ... FROM ..."}，
+    但由于解析器/转义原因，到达工具时 sql 参数变成整段 JSON 字符串。
+
+    返回：清洗后的 SQL 字符串（不会为 None，空值返回 ""）。
+    """
+    if sql is None:
+        return ""
+    # 快速路径：看起来已经是干净 SQL，直接返回
+    if isinstance(sql, str):
+        stripped = sql.strip()
+        if stripped and stripped.upper().startswith(
+            ('SELECT', 'WITH', 'SHOW', 'DESCRIBE', 'EXPLAIN', 'DESC')
+        ):
+            return stripped
+    try:
+        return MysqlDataBaseManager._extract_sql_from_nested_input(sql)
+    except Exception:
+        return str(sql).strip()
+
+
+def normalize_table_name_input(table_name):
+    """
+    从 LLM 可能输出的"嵌套 JSON"形式参数中提取真正的 table_name。
+    典型场景：
+        - 直接被当成字符串的完整 JSON： '{"table_name": "order_items"}'
+        - JSON 中 table_name 字段是列表： '{"table_name": ["orders", "products"]}'
+        - 或 LLM 把整段 JSON 直接塞进 list 里： ['{"table_name": "order_items"}']
+
+    返回取值优先级（第一个非空即返回）：
+        1) dict["table_name"]  /  json_str -> dict -> dict["table_name"]
+        2) 仅一项的 dict 的 value（比如 LLM 用了别的字段名）
+        3) 普通字符串 / 普通列表原样返回
+
+    返回类型：None（查所有表） / str（单表） / list[str]（多表）
+    """
+    if table_name is None:
+        return None
+
+    # 规范化：把 list 中仅一项且是 JSON 的情况展开
+    raw = table_name
+    if isinstance(raw, list) and len(raw) == 1:
+        raw = raw[0]
+
+    # 若是 dict，优先取里面的 table_name
+    if isinstance(raw, dict):
+        val = raw.get("table_name")
+        if val is None:
+            # 兼容其他可能被 LLM 使用的字段
+            for key in ("table_names", "tables", "name", "names"):
+                if key in raw:
+                    val = raw[key]
+                    break
+        if isinstance(val, (str, list)) and val:
+            return val
+        if val is None and raw:
+            # 还是拿不到则回退：如果是单 value 的 dict，取那个 value
+            only_val = next(iter(raw.values()))
+            if isinstance(only_val, (str, list)) and only_val:
+                return only_val
+        return None
+
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if not stripped:
+            return None
+        # 看起来是 JSON：尝试解析
+        if stripped.startswith("{") and stripped.endswith("}"):
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, dict):
+                    return normalize_table_name_input(parsed)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        # 看起来是 "[a, b, c]" 形式的列表字符串（langchain 偶尔会把列表字符串化）
+        if stripped.startswith("[") and stripped.endswith("]"):
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, list):
+                    return parsed
+            except (json.JSONDecodeError, ValueError):
+                pass
+        # 其他：普通表名字符串，原样返回
+        return stripped
+
+    # 已经是正常的 list[str]，原样返回
+    if isinstance(raw, list):
+        return raw
+
+    # 其他未知类型：转字符串兜底
+    return str(raw).strip()
+
+
 class queryDBTablesModel(BaseModel):
     """查询数据库中所有的表名和各个表的备注信息，不需要任何参数。直接调用即可返回所有表的列表。"""
     # 保留一个可选字段以防止 BaseTool 在没有字段时出错
@@ -80,28 +175,69 @@ class queryTablesStructure(BaseTool):
 
     def _run(self, table_name: str | list[str] | None = None) -> str:
         try:
-            # 处理各种输入类型：None / 空列表 / 空字符串 -> 查询所有表
+            # 先统一处理 LLM 嵌套 JSON 的情况：例如 table_name 是字符串 '{"table_name": "order_items"}'
+            table_name = normalize_table_name_input(table_name)
+
+            # 之后按正常输入类型做解析：None/空字符串/空列表 -> 查询所有表
             if table_name is None:
-                pass  # 直接传给 mysql_utils
+                target_tables = None
             elif isinstance(table_name, str):
                 stripped = table_name.strip()
                 if not stripped:
-                    table_name = None
+                    target_tables = None
                 else:
-                    # 单个字符串 -> 包成列表
-                    table_name = [stripped]
+                    # 再次做一次"兜底解析"，防止上面没有命中的 JSON 格式
+                    if stripped.startswith("{") and stripped.endswith("}"):
+                        try:
+                            parsed = json.loads(stripped)
+                            if isinstance(parsed, dict):
+                                v = parsed.get("table_name")
+                                if isinstance(v, str):
+                                    target_tables = [v]
+                                elif isinstance(v, list):
+                                    target_tables = [str(x).strip() for x in v if str(x).strip()]
+                                else:
+                                    target_tables = None
+                            else:
+                                target_tables = [stripped]
+                        except (json.JSONDecodeError, ValueError):
+                            target_tables = [stripped]
+                    else:
+                        target_tables = [stripped]
             elif isinstance(table_name, list):
-                # 过滤空字符串
-                cleaned = [t.strip() for t in table_name if isinstance(t, str) and t.strip()]
-                if not cleaned:
-                    table_name = None
-                else:
-                    table_name = cleaned
+                cleaned = []
+                for item in table_name:
+                    if isinstance(item, str):
+                        s = item.strip()
+                        if not s:
+                            continue
+                        # 列表元素也可能被嵌套成 "{'table_name': 'order_items'}"，再解析一层
+                        if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+                            try:
+                                parsed = json.loads(s)
+                                if isinstance(parsed, dict):
+                                    v = parsed.get("table_name")
+                                    if isinstance(v, str) and v.strip():
+                                        cleaned.append(v.strip())
+                                    elif isinstance(v, list):
+                                        cleaned.extend([str(x).strip() for x in v if str(x).strip()])
+                                elif isinstance(parsed, list):
+                                    cleaned.extend([str(x).strip() for x in parsed if str(x).strip()])
+                                else:
+                                    cleaned.append(s)
+                            except (json.JSONDecodeError, ValueError):
+                                cleaned.append(s)
+                        else:
+                            cleaned.append(s)
+                    else:
+                        s = str(item).strip()
+                        if s:
+                            cleaned.append(s)
+                target_tables = cleaned if cleaned else None
             else:
-                # 未知类型 -> 查询所有表
-                table_name = None
+                target_tables = None
 
-            table_structure: str = self.db.get_table_constructions(table_name)
+            table_structure: str = self.db.get_table_constructions(target_tables)
             tables_data: dict = json.loads(table_structure) if table_structure else {}
 
             # 查询指定表但结果为空的情况
@@ -203,7 +339,9 @@ class validateSQl(BaseTool):
 
     def _run(self, sql: str) -> str:
         try:
-            if not sql or not sql.strip():
+            # 同样处理 LLM 可能产生的"嵌套 JSON"参数
+            sql = normalize_sql_input(sql)
+            if not sql:
                 return "SQL 校验失败：SQL 语句为空。"
             result: dict = self.db.validate_sql(sql)
             is_valid = result.get('valid', False)
@@ -262,14 +400,20 @@ class executeSQL(BaseTool):
 
     def _run(self, sql: str) -> str:
         try:
-            if not sql or not sql.strip():
-                return "[执行失败] SQL 语句为空。"
+            # 解析 LLM 可能产生的"嵌套 JSON"参数，提取真正的 SQL
+            sql = normalize_sql_input(sql)
+            if not sql:
+                return "[执行失败] SQL 语句为空。请提供有效的 SELECT 语句。"
 
             result: list[dict] = self.db.execute_safe_query(sql)
             total = len(result)
 
             if total == 0:
-                return f"[执行结果] 无匹配数据（0 行）。\nSQL: {sql}"
+                return (
+                    f"[执行结果] SQL 查询已成功执行，但数据库中没有匹配的数据（0 行）。\n"
+                    f"执行的 SQL: {sql}\n"
+                    f"———提示：请尝试修改查询条件（例如放宽 WHERE 条件，或检查表名/字段名是否正确）。"
+                )
 
             truncated = False
             display = result
@@ -277,21 +421,39 @@ class executeSQL(BaseTool):
                 display = result[: self.MAX_ROWS]
                 truncated = True
 
+            # 格式化输出为表格样式，便于 LLM 解析数据
             data_lines = []
-            for row in display:
-                row_str = ", ".join(f"{k}={v}" for k, v in row.items())
-                data_lines.append(f"  {row_str}")
+            for row_idx, row in enumerate(display, 1):
+                # 使用 key=value 格式，但每行标上行号，便于读取
+                row_items = []
+                for k, v in row.items():
+                    if v is None:
+                        row_items.append(f"{k}=NULL")
+                    else:
+                        row_items.append(f"{k}={v}")
+                data_lines.append(f"  行{row_idx}: " + "; ".join(row_items))
 
-            header = f"[执行结果] 共 {total} 行。"
+            header = f"[执行结果成功] 共查询到 {total} 行数据。"
             if truncated:
-                header += f"（仅显示前 {self.MAX_ROWS} 行）"
-            header += f"  SQL: {sql}\n数据行：\n"
+                header += f"（由于数据量较大，仅显示前 {self.MAX_ROWS} 行，请基于这些数据分析）"
+            header += f"\n执行的 SQL: {sql}\n数据详情：\n"
 
-            return header + "\n".join(data_lines)
+            # 在末尾附加明确提示：这是最终数据，可以给 Final Answer 了
+            footer = (
+                "\n—以上为本次查询返回的数据。请你现在基于上述数据，用中文直接给出 Final Answer。"
+                "\n不要再调用任何工具。"
+            )
+
+            return header + "\n".join(data_lines) + footer
 
         except Exception as e:
             logger.exception(f"执行 SQL 失败: {e}")
-            return f"[执行失败]\nSQL: {sql}\n错误: {str(e)}"
+            return (
+                f"[执行失败] SQL 语句执行出错。\n"
+                f"SQL: {sql}\n"
+                f"错误信息: {str(e)}\n"
+                f"———提示：请重新检查 SQL 语法、表名/字段名是否正确，不要再次使用完全相同的 SQL。"
+            )
 
     async def _arun(self, sql: str) -> str:
         return self._run(sql=sql)

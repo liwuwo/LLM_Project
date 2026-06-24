@@ -20,6 +20,19 @@ class MysqlDataBaseManager:
         :param dbconnection_string: 数据库连接字符串
         """
         self.engine = create_engine(dbconnection_string, echo=False, pool_size=5, pool_recycle=3600)
+        # 记录本次请求中执行过的 SQL，供代理在最后统一打印总结
+        self._sql_execution_history: list[dict] = []
+
+    def append_sql_history(self, record: dict):
+        self._sql_execution_history.append(record)
+
+    def get_sql_history(self) -> list[dict]:
+        return list(self._sql_execution_history)
+
+    def get_and_clear_sql_history(self) -> list[dict]:
+        history = list(self._sql_execution_history)
+        self._sql_execution_history = []
+        return history
 
     def get_alltables_names(self) -> list[str]:
         try:
@@ -63,14 +76,101 @@ class MysqlDataBaseManager:
             inspector = inspect(self.engine)
             all_db_tables = set(inspector.get_table_names())
 
+            # 【关键修复】处理 LLM 嵌套 JSON 输入：如果 table_name 看起来是
+            #   '{"table_name": "order_items"}' 这种整段 JSON 字符串，
+            #   或 list 里只有一项且是 JSON，都需要先解析出真正的 table_name 字段。
+            def _unwrap(raw):
+                if raw is None:
+                    return None
+                if isinstance(raw, list) and len(raw) == 1:
+                    return _unwrap(raw[0])
+                if isinstance(raw, dict):
+                    for key in ("table_name", "table_names", "tables", "name", "names"):
+                        if key in raw and isinstance(raw[key], (str, list)) and raw[key]:
+                            return raw[key]
+                    # 回退：单 value 的 dict
+                    if len(raw) == 1:
+                        v = next(iter(raw.values()))
+                        if isinstance(v, (str, list)) and v:
+                            return v
+                    return None
+                if isinstance(raw, str):
+                    s = raw.strip()
+                    if not s:
+                        return None
+                    if s.startswith("{") and s.endswith("}"):
+                        try:
+                            parsed = json.loads(s)
+                            if isinstance(parsed, dict):
+                                return _unwrap(parsed)
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+                    if s.startswith("[") and s.endswith("]"):
+                        try:
+                            parsed = json.loads(s)
+                            if isinstance(parsed, list):
+                                return parsed
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+                    return s
+                return raw
+
+            table_name = _unwrap(table_name)
+
             # 规范化输入：统一成 [str] 列表，None 表示所有表
             if table_name is None:
                 target_tables: Optional[list[str]] = None
             elif isinstance(table_name, str):
                 stripped = table_name.strip()
-                target_tables = [stripped] if stripped else None
+                # 再次兜底：万一仍是一段 JSON（比如解析被 try/except 跳过了）
+                if stripped.startswith("{") and stripped.endswith("}"):
+                    try:
+                        parsed = json.loads(stripped)
+                        if isinstance(parsed, dict):
+                            v = parsed.get("table_name")
+                            if isinstance(v, str) and v.strip():
+                                target_tables = [v.strip()]
+                            elif isinstance(v, list):
+                                target_tables = [str(x).strip() for x in v if str(x).strip()]
+                            else:
+                                target_tables = None
+                        else:
+                            target_tables = [stripped]
+                    except (json.JSONDecodeError, ValueError):
+                        target_tables = [stripped]
+                else:
+                    target_tables = [stripped] if stripped else None
             elif isinstance(table_name, (list, tuple, set)):
-                cleaned = [t.strip() for t in table_name if isinstance(t, str) and t.strip()]
+                cleaned = []
+                for t in table_name:
+                    if isinstance(t, str):
+                        s = t.strip()
+                        if not s:
+                            continue
+                        # 列表元素也可能是嵌套 JSON，再解一层
+                        if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+                            try:
+                                parsed = json.loads(s)
+                                if isinstance(parsed, dict):
+                                    v = parsed.get("table_name")
+                                    if isinstance(v, str) and v.strip():
+                                        cleaned.append(v.strip())
+                                    elif isinstance(v, list):
+                                        cleaned.extend([str(x).strip() for x in v if str(x).strip()])
+                                    else:
+                                        cleaned.append(s)
+                                elif isinstance(parsed, list):
+                                    cleaned.extend([str(x).strip() for x in parsed if str(x).strip()])
+                                else:
+                                    cleaned.append(s)
+                            except (json.JSONDecodeError, ValueError):
+                                cleaned.append(s)
+                        else:
+                            cleaned.append(s)
+                    else:
+                        s = str(t).strip()
+                        if s:
+                            cleaned.append(s)
                 target_tables = cleaned if cleaned else None
             else:
                 logger.warning(f"get_table_constructions: 未知的 table_name 类型 {type(table_name)!r}，将返回所有表")
@@ -88,7 +188,7 @@ class MysqlDataBaseManager:
                     else:
                         missing_tables.append(t)
                 if missing_tables:
-                    logger.warning(f"以下表不存在于数据库中，将被忽略：{missing_tables}")
+                    logger.warning(f"以下表将被忽略：{missing_tables}")
 
             tables_info: dict[str, dict] = {}
             for tbl_name in existing_tables:
@@ -233,12 +333,111 @@ class MysqlDataBaseManager:
             result['message'] = 'SQL语句校验通过'
             result['sanitized_sql'] = sql_stripped
 
+            # 同时写入 SQL 执行历史，便于最终汇总
+            self.append_sql_history({
+                "raw_input": sql,
+                "sql": sql_stripped,
+                "success": True,
+                "rows": None,
+                "error": None,
+                "kind": "validate",
+            })
             return result
 
         except Exception as e:
             logger.exception(f"SQL校验异常: {e}")
             result['message'] = f'SQL校验过程出错: {str(e)}'
+            self.append_sql_history({
+                "raw_input": sql,
+                "sql": "",
+                "success": False,
+                "rows": None,
+                "error": str(e),
+                "kind": "validate",
+            })
             return result
+
+    @staticmethod
+    def _extract_sql_from_nested_input(raw_input) -> str:
+        """
+        从 LLM 可能返回的"嵌套 JSON 输入"中提取真正的 SQL 语句。
+
+        典型场景：LLM 按 ReAct 格式输出 Action Input 时，可能写成：
+            Action Input: {"sql": "SELECT MAX(price) FROM products"}
+        但由于解析器/转义原因，真正到达工具的 `sql` 参数可能变成：
+            '{"sql": "SELECT MAX(price) FROM products"}'  （整段 JSON 字符串）
+        甚至是 dict 对象。
+
+        此方法会：
+          1) 优先把 dict / 可解析 JSON 字符串中的 `sql` 字段提取出来；
+          2) 若仍不是以 SELECT 开头，再尝试去掉外层引号、分号等；
+          3) 都失败时原样返回（让后续的语法检查/执行报错给出提示）。
+        """
+        if raw_input is None:
+            return ""
+
+        # 情况 A：已经是 dict（LangChain 某些版本会直接解析成 dict）
+        if isinstance(raw_input, dict):
+            if 'sql' in raw_input and isinstance(raw_input['sql'], str):
+                return raw_input['sql'].strip()
+            # 若 dict 只有一个 value 且是字符串，退而求其次用它
+            values = [v for v in raw_input.values() if isinstance(v, str)]
+            if len(values) == 1:
+                return values[0].strip()
+            # 否则尝试 JSON 化后再让下面的字符串流程处理
+            try:
+                raw_input = json.dumps(raw_input, ensure_ascii=False)
+            except Exception:
+                return str(raw_input)
+
+        if not isinstance(raw_input, str):
+            raw_input = str(raw_input)
+
+        sql = raw_input.strip()
+        if not sql:
+            return ""
+
+        # 情况 B：字符串本身是一个 JSON：形如 "{"sql": "SELECT ..."}"
+        # 先用最宽松的方式尝试 json.loads
+        try:
+            parsed = json.loads(sql)
+            if isinstance(parsed, dict):
+                candidate = parsed.get('sql')
+                if isinstance(candidate, str) and candidate.strip():
+                    sql = candidate.strip()
+                elif len(parsed) == 1:
+                    # 某些工具用的字段名可能是别的（例如 query），兜底取唯一的 string value
+                    only_val = next(iter(parsed.values()))
+                    if isinstance(only_val, str) and only_val.strip():
+                        sql = only_val.strip()
+            elif isinstance(parsed, str) and parsed.strip():
+                sql = parsed.strip()
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # 情况 C：前后还有多余的引号/反引号，如 '"SELECT ..."'、"`SELECT ...`"
+        # 反复剥除，直到稳定或不再是以引号包裹
+        for _ in range(3):
+            changed = False
+            if len(sql) >= 2 and sql[0] == sql[-1] and sql[0] in ('"', "'", '`'):
+                sql = sql[1:-1].strip()
+                changed = True
+            if not changed:
+                break
+
+        # 情况 D：字符串里仍包含 "SELECT"，但开头是 "{"sql": ..." 之类的残留
+        # 做一次轻量正则兜底：抓取第一个以 SELECT 开头、以 ;/结尾或到末尾的片段
+        if not sql.upper().startswith(('SELECT', 'WITH', 'SHOW', 'DESCRIBE', 'EXPLAIN')):
+            m = re.search(
+                r'(?is)\b(SELECT|WITH|SHOW|DESCRIBE|DESC|EXPLAIN)\b.+(?=;|"|\'|`|\}\s*$|$)',
+                sql,
+            )
+            if m:
+                candidate = m.group(0).strip().rstrip(';').strip()
+                if candidate:
+                    sql = candidate
+
+        return sql.strip().rstrip(';').strip()
 
     def execute_safe_query(self, sql: str) -> list[dict]:
         """
@@ -248,6 +447,20 @@ class MysqlDataBaseManager:
         """
 
         try:
+            # 1. 处理 LLM 可能的嵌套 JSON 输入，提取真正的 SQL
+            raw_sql_input = sql
+            sql = self._extract_sql_from_nested_input(sql)
+            if not sql:
+                record = {
+                    "raw_input": raw_sql_input,
+                    "sql": "",
+                    "success": False,
+                    "rows": 0,
+                    "error": "SQL 语句为空（解析后未得到有效 SQL）",
+                }
+                self.append_sql_history(record)
+                raise ValueError("SQL 语句为空（解析后未得到有效 SQL）")
+
             # 2. 创建连接并执行查询
             with self.engine.connect() as connection:
                 # 使用参数化查询防止SQL注入
@@ -269,10 +482,24 @@ class MysqlDataBaseManager:
                     rows.append(row_dict)
 
                 logger.info(f"成功执行查询，返回 {len(rows)} 条记录")
+                self.append_sql_history({
+                    "raw_input": raw_sql_input,
+                    "sql": sql,
+                    "success": True,
+                    "rows": len(rows),
+                    "error": None,
+                })
                 return rows
 
         except SQLAlchemyError as e:
             logger.exception(f"执行SQL查询失败: {e}")
+            self.append_sql_history({
+                "raw_input": raw_sql_input if 'raw_sql_input' in locals() else sql,
+                "sql": sql if 'sql' in locals() else "",
+                "success": False,
+                "rows": 0,
+                "error": str(e),
+            })
             raise ValueError(f"查询执行失败: {str(e)}")
 
 
