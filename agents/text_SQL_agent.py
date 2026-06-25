@@ -1,8 +1,10 @@
 from langchain_classic.agents import initialize_agent, AgentExecutor, AgentType
+from agents.conversation_memory import ConversationHistory
 
 from tools.text_SQL_Tools import queryDBTables, queryTablesStructure, validateSQl, executeSQL
 from db.mysql_utils import MysqlDataBaseManager
 from db.config import DATABASE_URL
+from utils.constants import AGENT_PROMPT, AGENT_MEMORY_ENABLED, AGENT_MAX_MEMORY_TURNS
 from llm.llms import deepseek_llm, local_llm
 from utils.logUtils import logger
 
@@ -20,10 +22,10 @@ class TextSQLAgent:
     """
 
     def __init__(
-        self,
-        use_local_llm: bool = False,
-        max_iterations: int = 20,
-        verbose: bool = True,
+            self,
+            use_local_llm: bool = False,
+            max_iterations: int = 20,
+            verbose: bool = True,
     ):
         """
         初始化 Text-to-SQL Agent
@@ -33,7 +35,13 @@ class TextSQLAgent:
         """
         # 1. 选择 LLM 模型
         self.llm = local_llm if use_local_llm else deepseek_llm
-        logger.info(f"使用 LLM 模型: {'本地模型' if use_local_llm else 'DeepSeek 云端模型'}")
+        # 打印精确配置：避免"以为用了本地模型但其实连的是云端"这类排查陷阱
+        base_url = getattr(self.llm, 'base_url', None)
+        model = getattr(self.llm, 'model_name', None) or getattr(self.llm, 'model', None)
+        logger.info(
+            f"使用 LLM 模型: {'本地模型' if use_local_llm else 'DeepSeek 云端模型'} "
+            f"(model={model!r}, base_url={base_url!r})"
+        )
 
         # 2. 初始化数据库管理器（失败会抛出异常）
         self.db_manager = MysqlDataBaseManager(DATABASE_URL)
@@ -48,7 +56,24 @@ class TextSQLAgent:
         ]
         logger.info(f"注册工具: {[t.name for t in self.tools]}")
 
-        # 4. 创建 Agent
+        # 4. 初始化对话记忆
+        #    采用零依赖的 ConversationHistory（自实现，接口与 LangChain
+        #    ConversationBufferMemory 完全兼容，避免因 langchain.memory 缺失而降级）
+        self.memory_enabled = AGENT_MEMORY_ENABLED
+        self.max_memory_turns = max(1, int(AGENT_MAX_MEMORY_TURNS))
+        if self.memory_enabled:
+            self.memory = ConversationHistory(
+                memory_key="chat_history",
+                return_messages=False,  # 返回字符串（"用户: xxx\n助手: xxx"）而非消息对象
+                human_prefix="用户",  # 自定义中文前缀，让 Prompt 更自然
+                ai_prefix="助手",
+            )
+            logger.info(f"对话记忆已启用（最多保留 {self.max_memory_turns} 轮）")
+        else:
+            self.memory = None
+            logger.info("对话记忆已禁用（每次查询独立，配置 AGENT_MEMORY_ENABLED=False）")
+
+        # 5. 创建 Agent
         self.agent_executor = self._create_agent(
             max_iterations=max_iterations,
             verbose=verbose,
@@ -171,7 +196,7 @@ class TextSQLAgent:
             lines.append(last_result[:1500])
             return "\n".join(lines)
 
-    def _clean_react_output(self, text: str) -> str:
+    def _clean_react_output(self, text: str) -> str | None:
         """
         清理答案中的 ReAct 格式标记（Thought/Action/Action Input 等），仅保留有意义的内容。
         """
@@ -268,6 +293,92 @@ class TextSQLAgent:
         print("=" * 78)
         print()
 
+    def _save_to_memory(self, question: str, answer: str):
+        """
+        将一次问答写入对话记忆。
+        - 会自动做长度截断，防止写入过长的 SQL 结果摘要污染后续对话
+        - 写入后调用 _trim_memory() 确保不超过最大轮数
+        - 如果 memory 未启用，直接返回不做任何操作
+        """
+        # 用显式 is None 检查而非隐式 bool 判断：
+        # 因为记忆对象本身实现了 __len__，空状态不代表对象不存在
+        if not self.memory_enabled or self.memory is None:
+            return
+
+        # 防止超长答案污染历史：超过 500 字符就截断，保留开头语义
+        safe_answer = str(answer)
+        if len(safe_answer) > 500:
+            safe_answer = safe_answer[:500] + "..."
+
+        try:
+            self.memory.save_context({"input": str(question)}, {"output": safe_answer})
+            # 写入后做轮数裁剪
+            self._trim_memory()
+            logger.info(f"已写入对话记忆，当前共 {self.get_memory_turns()} 轮")
+        except Exception as e:
+            logger.warning(f"写入对话记忆失败（不影响本次查询）: {e}")
+
+    def _trim_memory(self):
+        """
+        确保记忆不超过 AGENT_MAX_MEMORY_TURNS 轮。
+        ConversationBufferMemory 不自带轮数限制，这里手动实现：
+        每条"用户提问 + 助手回答"算 1 轮，对应 2 条消息。
+        超过限制时，丢弃最早的一轮。
+        """
+        if self.memory is None:
+            return
+        max_messages = self.max_memory_turns * 2  # 每轮 = Human + AI = 2 条消息
+        messages = self.memory.chat_memory.messages
+        while len(messages) > max_messages:
+            messages.pop(0)
+            messages.pop(0)
+            logger.info("对话记忆已满，丢弃最早 1 轮对话以控制上下文长度")
+
+    def _format_chat_history_for_prompt(self) -> str:
+        """
+        从 memory 读取历史，格式化为可直接拼入 Prompt 的文本块。
+        返回值示例（不为空时）：
+            用户: 帮我查一下会员表
+            助手: 根据查询结果，会员表有 xxx 条记录...
+            用户: 那再帮我看一下最近一周的消费
+            助手: ...
+        如果没有历史对话或记忆未启用，返回空字符串。
+        """
+        if not self.memory_enabled or self.memory is None:
+            return ""
+
+        history_str = self.memory.load_memory_variables({}).get("chat_history", "")
+        history_str = str(history_str).strip()
+        if not history_str:
+            return ""
+
+        # 格式化为 Prompt 中的一个清晰段落
+        return (
+            "以下是你与用户之前的对话内容，请作为上下文参考。"
+            "如果用户的问题与之前的对话相关（例如指代'刚才的结果''那些会员'等），"
+            "请基于这段历史理解用户的真实意图，再决定如何查询数据库。\n"
+            f"{history_str}\n"
+            "（以上是对话历史，接下来请处理用户的新问题）"
+        )
+
+    def clear_memory(self):
+        """
+        清空对话记忆。适用于：用户切换话题、主动要求"重新开始"、或检测到上下文混乱时。
+        """
+        if self.memory:
+            self.memory.clear()
+            logger.info("对话记忆已清空")
+
+    def get_memory_turns(self) -> int:
+        """
+        返回当前记忆中的对话轮数。用于 UI 显示状态或调试。
+        1 轮 = 1 次用户提问 + 1 次助手回答。
+        ConversationHistory 已实现 __len__，可直接返回 len(self.memory)。
+        """
+        if self.memory is None:
+            return 0
+        return len(self.memory)
+
     def query(self, question: str) -> dict:
         """
         执行自然语言查询。
@@ -289,48 +400,25 @@ class TextSQLAgent:
         try:
             logger.info(f"收到查询请求: {question}")
 
-            # 给 LLM 一个更清晰的工作目标、格式示例和停止条件
-            prompt_prefix = (
-                "你是一名数据库助手，可以通过调用工具查询数据库。\n"
-                "\n【工具列表】"
-                "\n  - queryDBTables：查看数据库中有哪些表（第一次查询时强烈建议先调用此工具）"
-                "\n  - queryTablesStructure：查看某个或某些表的字段与结构"
-                "\n  - validateSQl：验证 SQL 是否合法（仅在你对 SQL 不确定时调用，通常可跳过）"
-                "\n  - executeSQL：执行 SELECT 查询，直接返回真实数据"
-                "\n\n【重要：输出格式与流程】"
-                "\n  你必须严格按以下格式输出，每轮只输出一个 Action（不要多轮写在一起）："
-                "\n  "
-                "\n  步骤 1 — 思考："
-                "\n    Thought: <用中文写一行简短的推理，说明你想做什么、打算查什么>"
-                "\n  "
-                "\n  步骤 2 — 调用工具（必须严格用 JSON 格式写 Action Input，引号和括号绝对不能省略）："
-                "\n    Action: <工具名，只能是 queryDBTables / queryTablesStructure / validateSQl / executeSQL 四选一>"
-                "\n    Action Input: {\"参数名\": \"参数值\"}"
-                "\n  "
-                "\n  【格式示例】"
-                '\n    示例 1（查询表结构）：'
-                '\n    Thought: 我需要先查看 orders 表的结构，了解订单表的字段。'
-                '\n    Action: queryTablesStructure'
-                '\n    Action Input: {"table_name": "orders"}'
-                '\n  '
-                '\n    示例 2（执行 SQL）：'
-                '\n    Thought: 现在我有了表结构，可以执行 SQL 查询数据。'
-                '\n    Action: executeSQL'
-                '\n    Action Input: {"sql": "SELECT * FROM orders LIMIT 10"}'
-                "\n  "
-                "\n  步骤 3 — 拿到 Observation（工具返回结果）后："
-                "\n    - 如果 Observation 已经包含你需要的数据，**立即** 输出 Final Answer，不要再产生任何 Thought/Action。"
-                "\n    - 如果数据不够，才能继续下一轮 Thought → Action → Action Input。"
-                "\n  "
-                "\n  步骤 4 — 给出最终答案："
-                "\n    Final Answer: <用中文总结 Observation 的数据，直接回答用户问题，不要使用任何工具调用格式>"
-                "\n\n【绝对规则】"
-                "\n  1) Action Input 必须是合法 JSON 对象，必须用双引号。例如：{\"sql\": \"SELECT ...\"}"
-                "\n  2) 通过 executeSQL 拿到真实数据后，**必须立即输出 Final Answer**，绝对不要再思考或再调用工具。"
-                "\n  3) Final Answer 是最终答案，不要再写 Thought/Action/Action Input 等字样。"
-                "\n  4) Final Answer 要用中文。"
-                f"\n\n用户问题：{question}"
-            )
+            # ── 第一步：从 LangChain Memory 读取历史并拼入 Prompt ──
+            prompt_template = AGENT_PROMPT.replace("\\n", "\n")
+            chat_history_block = self._format_chat_history_for_prompt()
+
+            # 如果 chat_history_block 为空，把 {chat_history} 占位符所在的整段也清理掉
+            # 避免 Prompt 中出现空的"【对话历史】"标题
+            if chat_history_block:
+                final_prompt = prompt_template.replace("{chat_history}", chat_history_block)
+            else:
+                # 没有历史：移除 "【对话历史】\n{chat_history}\n" 及其前后的空行
+                import re as _re
+                final_prompt = _re.sub(
+                    r'\n*【对话历史】\n\{chat_history\}\n*',
+                    '\n',
+                    prompt_template
+                )
+
+            # 末尾拼接当前用户问题（保持与旧版本一致的位置）
+            prompt_prefix = f"{final_prompt}\n\n用户问题：{question}"
 
             result = self.agent_executor.invoke({'input': prompt_prefix})
 
@@ -339,9 +427,9 @@ class TextSQLAgent:
 
             # 检测是否因迭代/时间超限被终止
             is_iteration_limit = (
-                'iteration limit' in str(raw_output).lower()
-                or 'time limit' in str(raw_output).lower()
-                or 'stopped due to' in str(raw_output).lower()
+                    'iteration limit' in str(raw_output).lower()
+                    or 'time limit' in str(raw_output).lower()
+                    or 'stopped due to' in str(raw_output).lower()
             )
 
             # 清理答案：尝试从输出中提取 Final Answer
@@ -354,12 +442,15 @@ class TextSQLAgent:
                     "触发兜底逻辑生成答案。"
                 )
                 answer = self._generate_clean_answer(question, intermediate_steps)
+                # ── 写入记忆（迭代超限也要记录，下次可做上下文衔接）──
+                self._save_to_memory(question, answer)
                 self._print_sql_summary(question)
                 return {
                     'success': True,
                     'answer': answer,
                     'partial_answer': True,
                     'intermediate_steps': intermediate_steps,
+                    'memory_turns': self.get_memory_turns(),
                 }
 
             # 情况 2：Agent 返回了包含 ReAct 格式的混乱输出 → 触发兜底
@@ -369,31 +460,71 @@ class TextSQLAgent:
                     f"将基于 executeSQL 结果重新生成答案。"
                 )
                 answer = self._generate_clean_answer(question, intermediate_steps)
+                # ── 写入记忆 ──
+                self._save_to_memory(question, answer)
                 self._print_sql_summary(question)
                 return {
                     'success': True,
                     'answer': answer,
                     'partial_answer': True,
                     'intermediate_steps': intermediate_steps,
+                    'memory_turns': self.get_memory_turns(),
                 }
 
             # 情况 3：正常返回了 Final Answer（被 _clean_react_output 已提取）
             logger.info("查询执行完成")
+            # ── 写入记忆 ──
+            self._save_to_memory(question, answer)
             self._print_sql_summary(question)
             return {
                 'success': True,
                 'answer': answer,
                 'intermediate_steps': intermediate_steps,
+                'memory_turns': self.get_memory_turns(),
             }
 
         except Exception as e:
-            logger.exception(f"查询执行失败: {e}")
+            # ── 按异常类型给出更有针对性的中文提示 ──
+            err_str = str(e)
+            err_lower = err_str.lower()
+
+            if ("connection error" in err_lower
+                    or "remote protocol error" in err_lower
+                    or "server disconnected" in err_lower
+                    or "temporary failure in name resolution" in err_lower
+                    or "connecttimeout" in err_lower):
+                answer = (
+                    "❌ 无法连接到 LLM 服务（网络连接异常）。\n"
+                    "   请检查：\n"
+                    "     1. 当前机器是否能访问 api.deepseek.com（可在终端用 curl 测试）\n"
+                    "     2. 是否需要使用代理访问外网\n"
+                    "     3. 尝试使用本地模型：创建 Agent 时传 use_local_llm=True"
+                )
+            elif ("401" in err_lower
+                  or "invalid api key" in err_lower
+                  or "unauthorized" in err_lower):
+                answer = "❌ API Key 无效或已过期，请在 .env 中更新 DEEPSEEK_API_KEY。"
+            elif ("429" in err_lower
+                  or "rate limit" in err_lower
+                  or "insufficient quota" in err_lower):
+                answer = "❌ API 调用频次超限 / 额度不足，请稍后再试或更换 API Key。"
+            elif "timeout" in err_lower:
+                answer = "❌ 模型响应超时，请稍后再试；如持续出现请换用本地模型（use_local_llm=True）。"
+            else:
+                answer = f"查询执行失败: {err_str}"
+
+            # 原始异常写日志（便于排查）
+            logger.exception(f"查询执行失败: {err_str}")
+
+            # 简短错误写入记忆，避免污染上下文
+            self._save_to_memory(question, f"查询失败：{answer[:80]}")
             self._print_sql_summary(question)
             return {
                 'success': False,
-                'error': str(e),
-                'answer': f"查询执行失败: {str(e)}",
+                'error': err_str,
+                'answer': answer,
                 'intermediate_steps': [],
+                'memory_turns': self.get_memory_turns(),
             }
 
     def query_simple(self, question: str) -> str:
@@ -406,17 +537,18 @@ class TextSQLAgent:
 
 # 使用示例
 if __name__ == '__main__':
-    agent = TextSQLAgent(use_local_llm=False)
-
-    test_questions = [
-
-        "查询哪些会员购买了商品，具体的商品单价和总消费金额是多少"
-    ]
-
-    for question in test_questions:
-        print('\n' + '=' * 80)
-        print(f"问题: {question}")
-        print('=' * 80)
-        answer = agent.query_simple(question)
-        print(f"\n答案:\n{answer}")
-        print('\n')
+    # agent = TextSQLAgent(use_local_llm=False)
+    #
+    # test_questions = [
+    #
+    #     "查询哪些会员购买了商品，具体的商品单价和总消费金额是多少"
+    # ]
+    #
+    # for question in test_questions:
+    #     print('\n' + '=' * 80)
+    #     print(f"问题: {question}")
+    #     print('=' * 80)
+    #     answer = agent.query_simple(question)
+    #     print(f"\n答案:\n{answer}")
+    #     print('\n')
+    print(AGENT_PROMPT)

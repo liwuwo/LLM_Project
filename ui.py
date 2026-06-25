@@ -3,7 +3,7 @@ import os
 import base64
 from llm.llms import deepseek_llm
 from agents.text_SQL_agent import TextSQLAgent
-
+from utils.constants import USE_LOCAL_LLM
 currentLLM = deepseek_llm
 
 # 初始化 TextSQLAgent（懒加载，首次使用时才创建）
@@ -14,7 +14,8 @@ def get_sql_agent():
     """获取 TextSQLAgent 实例（单例懒加载）。"""
     global _sql_agent
     if _sql_agent is None:
-        _sql_agent = TextSQLAgent(use_local_llm=False, max_iterations=15, verbose=False)
+
+        _sql_agent = TextSQLAgent(use_local_llm=USE_LOCAL_LLM, max_iterations=15, verbose=False)
     return _sql_agent
 
 

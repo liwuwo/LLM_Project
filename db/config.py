@@ -12,3 +12,4 @@ MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "lww_schema_test")
 
 # 构建 SQLAlchemy 数据库 URL
 DATABASE_URL = f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}?charset=utf8mb4"
+
