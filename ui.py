@@ -13,8 +13,10 @@ _sql_agent = None
 def get_sql_agent():
     """获取 TextSQLAgent 实例（单例懒加载）。"""
     global _sql_agent
-    if _sql_agent is None:
 
+
+
+    if _sql_agent is None:
         _sql_agent = TextSQLAgent(use_local_llm=USE_LOCAL_LLM, max_iterations=15, verbose=False)
     return _sql_agent
 
