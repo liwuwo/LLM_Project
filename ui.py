@@ -250,4 +250,9 @@ with gr.Blocks(title="LLM助手") as demo:
 
 
 if __name__ == "__main__":
-    demo.launch(theme=gr.themes.Soft())
+    demo.launch(
+        server_name="0.0.0.0",  # 允许外部访问（AutoDL 部署必须）
+        server_port=7860,
+        theme=gr.themes.Soft(),
+        share=False,  # 如需临时公网分享可改为 True
+    )
