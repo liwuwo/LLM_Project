@@ -1,7 +1,12 @@
+from langchain.agents import create_agent
+from langchain.agents.middleware import ModelCallLimitMiddleware, ToolRetryMiddleware
 from langchain_classic.agents import initialize_agent, AgentExecutor, AgentType
+from langchain_core.utils.pydantic import create_model
+from langgraph.graph.state import CompiledStateGraph
+
 from agents.conversation_memory import ConversationHistory
 
-from tools.text_SQL_Tools import queryDBTables, queryTablesStructure, validateSQl, executeSQL
+from tools.text_SQL_tools import queryDBTables, queryTablesStructure, validateSQl, executeSQL
 from db.mysql_utils import MysqlDataBaseManager
 from db.config import DATABASE_URL
 from utils.constants import AGENT_PROMPT, AGENT_MEMORY_ENABLED, AGENT_MAX_MEMORY_TURNS
@@ -80,7 +85,7 @@ class TextSQLAgent:
         )
         logger.info("TextSQLAgent 初始化完成")
 
-    def _create_agent(self, max_iterations: int = 20, verbose: bool = True) -> AgentExecutor:
+    def _create_agent(self, max_iterations: int = 20, verbose: bool = True) -> CompiledStateGraph:
         """
         创建 ReAct 模式的 Agent。
         - max_iterations: 最大迭代次数（防止无限循环）
@@ -100,16 +105,23 @@ class TextSQLAgent:
             hint += "\n\n切记：Action Input 必须是合法的 JSON 对象，包含 'sql' 字段。"
             return hint
 
-        agent_executor = initialize_agent(
+        agent_executor = create_agent(
+            model=self.llm,
             tools=self.tools,
-            llm=self.llm,
-            agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-            verbose=verbose,
-            max_iterations=max_iterations,
-            max_execution_time=120,
-            early_stopping_method="generate",
-            handle_parsing_errors=_handle_parsing_error,
-            return_intermediate_steps=True,
+            system_prompt=AGENT_PROMPT.replace("\\n", "\n"),
+            response_format=None,
+            middleware=[
+                ModelCallLimitMiddleware(run_limit=max_iterations),
+                ToolRetryMiddleware(max_retries=3)
+            ]
+
+            # agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+            # verbose=verbose,
+            # max_iterations=max_iterations,
+            # max_execution_time=120,
+            # early_stopping_method="generate",
+            # handle_parsing_errors=_handle_parsing_error,
+            # return_intermediate_steps=True,
         )
         return agent_executor
 

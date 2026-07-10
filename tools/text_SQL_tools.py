@@ -1,8 +1,6 @@
 from langchain.tools import BaseTool
 import json
-
 from pydantic import BaseModel, Field
-
 from db.mysql_utils import MysqlDataBaseManager
 from utils.logUtils import logger
 
@@ -21,7 +19,7 @@ def normalize_sql_input(sql):
     if isinstance(sql, str):
         stripped = sql.strip()
         if stripped and stripped.upper().startswith(
-            ('SELECT', 'WITH', 'SHOW', 'DESCRIBE', 'EXPLAIN', 'DESC')
+                ('SELECT', 'WITH', 'SHOW', 'DESCRIBE', 'EXPLAIN', 'DESC')
         ):
             return stripped
     try:
@@ -297,8 +295,8 @@ class queryTablesStructure(BaseTool):
                 result_parts.append(part)
 
             return (
-                f"共查询到 {len(result_parts)} 张表的结构信息：\n\n"
-                + '\n'.join(result_parts)
+                    f"共查询到 {len(result_parts)} 张表的结构信息：\n\n"
+                    + '\n'.join(result_parts)
             )
 
         except Exception as e:
@@ -464,4 +462,4 @@ if __name__ == '__main__':
 
     db_manager = MysqlDataBaseManager(DATABASE_URL)
     tool = queryTablesStructure(db=db_manager)
-    print(tool.invoke({'table_name':['order_items', 'orders']}))
+    print(tool.invoke({'table_name': ['order_items', 'orders']}))

@@ -9,8 +9,7 @@ DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL")
 
 
 # Text-to-SQL Agent Prompt 模板（{chat_history} 是对话历史占位符，在 query() 中展开）
-DEFAULT_AGENT_PROMPT = "你是一名数据库助手，可以通过调用工具查询数据库。"
-AGENT_PROMPT = os.getenv("AGENT_PROMPT", DEFAULT_AGENT_PROMPT)
+AGENT_PROMPT = os.getenv("AGENT_PROMPT", "你是一名数据库助手，可以通过调用工具查询数据库。")
 
 # Text-to-SQL Agent 对话记忆配置
 # AGENT_MEMORY_ENABLED   : 是否启用多轮对话记忆（True/False）
@@ -23,3 +22,8 @@ def _parse_bool(val, default=False):
 AGENT_MEMORY_ENABLED=_parse_bool(os.getenv("AGENT_MEMORY_ENABLED"), default=True)
 AGENT_MAX_MEMORY_TURNS=int(os.getenv("AGENT_MAX_MEMORY_TURNS", "5"))
 USE_LOCAL_LLM=_parse_bool(os.getenv("USE_LOCAL_LLM"), default=False)
+
+# 和风天气 API 配置
+QWEATHER_BASE_URL = os.getenv("QWEATHER_BASE_URL")
+QWEATHER_API_KEY = os.getenv("QWEATHER_API_KEY")
+WEATHER_PROMPT = os.getenv("WEATHER_PROMPT", "你是一名天气助手，可以通过调用工具查询天气。")

@@ -231,7 +231,6 @@ class MysqlDataBaseManager:
                     })
 
                 table_comment_obj = inspector.get_table_comment(tbl_name)
-                table_comment = ''
                 if isinstance(table_comment_obj, dict):
                     table_comment = table_comment_obj.get('text', '') or ''
                 else:
