@@ -188,6 +188,8 @@ class queryWeather(BaseTool):
         }
         return field_mapping.get(field, field)
     def _run(self, city: str, district: str | None = None) -> str:
+        logger.info(f"####_run 查询 {city} {district or ''} 的天气信息####")
+
         try:
             result = self.get_Qweather_info(city, district)
             # 解析 JSON 数据

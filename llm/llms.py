@@ -8,7 +8,7 @@ from utils.constants import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL
 #     （langchain_openai 底层默认就会对 5xx/网络错误做若干次指数退避重试，
 #      显式声明更可控）
 deepseek_llm = ChatOpenAI(
-    model="deepseek-chat",
+    model="deepseek-v4-flash",
     api_key=DEEPSEEK_API_KEY,
     base_url=DEEPSEEK_BASE_URL,
     temperature=0.2,

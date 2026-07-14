@@ -4,17 +4,27 @@ import base64
 from llm.llms import deepseek_llm
 from agents.text_SQL_agent import TextSQLAgent
 from utils.constants import USE_LOCAL_LLM
+from agents.weather_agent import WeatherAgent
+from utils.logUtils import logger
+
 currentLLM = deepseek_llm
 
 # 初始化 TextSQLAgent（懒加载，首次使用时才创建）
 _sql_agent = None
+_weather_agent = None
+
+
+def get_weather_agent():
+    """获取天气代理实例（单例懒加载）。"""
+    global _weather_agent
+    if _weather_agent is None:
+        _weather_agent = WeatherAgent(use_local_llm=USE_LOCAL_LLM)
+    return _weather_agent
 
 
 def get_sql_agent():
     """获取 TextSQLAgent 实例（单例懒加载）。"""
     global _sql_agent
-
-
 
     if _sql_agent is None:
         _sql_agent = TextSQLAgent(use_local_llm=USE_LOCAL_LLM, max_iterations=15, verbose=False)
@@ -22,7 +32,6 @@ def get_sql_agent():
 
 
 with gr.Blocks(title="LLM助手") as demo:
-
     gr.Markdown("# LLM 聊天助手")
 
     with gr.Tabs() as tabs:
@@ -66,6 +75,7 @@ with gr.Blocks(title="LLM助手") as demo:
             with gr.Row():
                 clear_btn = gr.Button("清空对话", variant="secondary")
 
+
             def respond(message, chat_history, images, audios, videos):
                 if not message.strip():
                     yield "", chat_history, images, audios, videos
@@ -74,6 +84,37 @@ with gr.Blocks(title="LLM助手") as demo:
                 chat_history.append({"role": "user", "content": message})
                 chat_history.append({"role": "assistant", "content": ""})
                 yield "", chat_history, None, None, None
+
+                # 通过 LLM 分析用户问题，判断是否为天气问题并提取相关信息
+                weather_agent = get_weather_agent()
+                analysis_result = weather_agent.analyze_weather_question(message)
+                
+                is_weather = analysis_result.get('is_weather', False)
+                city = analysis_result.get('city', '')
+                district = analysis_result.get('district', '')
+                weather_indices = analysis_result.get('weather_indices', [])
+
+                logger.info(f"天气问题分析结果: is_weather={is_weather}, city={city}, district={district}, indices={weather_indices}")
+
+                if is_weather:
+
+                    chat_history[-1]["content"] = f"⏳ 正在查询{'【' + city + '】' if city else ''}天气..."
+                    yield "", chat_history, None, None, None
+
+                    try:
+                        result = weather_agent.query(analysis_result)
+                        answer = result.get('answer', '查询失败')
+                        success = result.get('success', False)
+
+                        if success:
+                            chat_history[-1]["content"] = answer
+                        else:
+                            chat_history[-1]["content"] = f"❌ {answer}"
+                        yield "", chat_history, None, None, None
+                    except Exception as e:
+                        chat_history[-1]["content"] = f"❌ 天气查询失败：{str(e)}"
+                        yield "", chat_history, None, None, None
+                    return
 
                 # 工具函数：读取文件并编码为 base64 data URI
                 def encode_file(file_path, mime_type):
@@ -90,7 +131,9 @@ with gr.Blocks(title="LLM助手") as demo:
                     if ext in image_exts:
                         return {"type": "image_url", "image_url": {"url": encode_file(file_path, "image/jpeg")}}
                     elif ext in audio_exts:
-                        return {"type": "input_audio", "input_audio": {"data": encode_file(file_path, f"audio/{ext[1:]}").split(",", 1)[1], "format": ext[1:]}}
+                        return {"type": "input_audio",
+                                "input_audio": {"data": encode_file(file_path, f"audio/{ext[1:]}").split(",", 1)[1],
+                                                "format": ext[1:]}}
                     elif ext in video_exts:
                         return {"type": "video_url", "video_url": {"url": encode_file(file_path, f"video/{ext[1:]}")}}
                     return None
@@ -118,6 +161,7 @@ with gr.Blocks(title="LLM助手") as demo:
                 for chunk in currentLLM.stream(messages):
                     chat_history[-1]["content"] += chunk.content
                     yield "", chat_history, None, None, None
+
 
             send_btn.click(
                 respond,
@@ -157,6 +201,7 @@ with gr.Blocks(title="LLM助手") as demo:
                 show_thoughts = gr.Checkbox(label="显示思考推理过程", value=False, scale=1)
                 sql_status = gr.Markdown("*等待输入...*")
 
+
             def _strip_react_format(text):
                 """彻底清理文本中残留的 ReAct 格式标记（Thought/Action/Action Input/Final Answer 等）。"""
                 if not text:
@@ -173,6 +218,7 @@ with gr.Blocks(title="LLM助手") as demo:
                     filtered.append(line)
                 cleaned = '\n'.join(filtered).strip()
                 return cleaned
+
 
             def format_intermediate_steps(intermediate_steps):
                 """将 Agent 的中间步骤格式化为 Markdown 文本，便于展示工具调用过程。"""
@@ -193,6 +239,7 @@ with gr.Blocks(title="LLM助手") as demo:
                     lines.append(f"> 输出：\n```\n{obs_str}\n```")
                 lines.append("")
                 return "\n".join(lines)
+
 
             def sql_respond(message, chat_history, show_thoughts_flag):
                 if not message or not message.strip():
@@ -233,6 +280,7 @@ with gr.Blocks(title="LLM助手") as demo:
                     chat_history[-1]["content"] = f"❌ 查询执行失败：{str(e)}"
                     yield "", chat_history, "*查询出错，请检查数据库连接或问题表述。*"
 
+
             sql_send_btn.click(
                 sql_respond,
                 inputs=[sql_user_input, sql_chatbot, show_thoughts],
@@ -248,10 +296,9 @@ with gr.Blocks(title="LLM助手") as demo:
                 outputs=[sql_user_input, sql_chatbot, sql_status],
             )
 
-
 if __name__ == "__main__":
     demo.launch(
-        server_name="0.0.0.0",  # 允许外部访问（AutoDL 部署必须）
+        server_name="127.0.0.1",  # 允许外部访问（AutoDL 部署必须）
         server_port=7860,
         theme=gr.themes.Soft(),
         share=False,  # 如需临时公网分享可改为 True
