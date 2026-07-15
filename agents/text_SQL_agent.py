@@ -6,7 +6,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from agents.conversation_memory import ConversationHistory
 
-from tools.text_SQL_tools import queryDBTables, queryTablesStructure, validateSQl, executeSQL
+from tools.text_SQL_tools import QueryDBTables, QueryTablesStructure, validateSQl, executeSQL
 from db.mysql_utils import MysqlDataBaseManager
 from db.config import DATABASE_URL
 from utils.constants import AGENT_PROMPT, AGENT_MEMORY_ENABLED, AGENT_MAX_MEMORY_TURNS
@@ -20,8 +20,8 @@ class TextSQLAgent:
     能够理解用户的自然语言问题，自动转换为SQL查询并返回结果。
 
     典型的工具调用流程：
-        1) 调用 queryDBTables        -> 了解数据库中有哪些表
-        2) 调用 queryTablesStructure -> 了解相关表的字段与结构
+        1) 调用 QueryDBTables        -> 了解数据库中有哪些表
+        2) 调用 QueryTablesStructure -> 了解相关表的字段与结构
         3) 调用 validateSQl          -> 检查生成的 SQL 合法性
         4) 调用 executeSQL           -> 执行 SQL 获取结果
     """
@@ -30,7 +30,6 @@ class TextSQLAgent:
             self,
             use_local_llm: bool = False,
             max_iterations: int = 20,
-            verbose: bool = True,
     ):
         """
         初始化 Text-to-SQL Agent
@@ -54,8 +53,8 @@ class TextSQLAgent:
 
         # 3. 创建工具列表（按工具调用顺序排列，帮助 LLM 理解）
         self.tools = [
-            queryDBTables(db=self.db_manager),
-            queryTablesStructure(db=self.db_manager),
+            QueryDBTables(db=self.db_manager),
+            QueryTablesStructure(db=self.db_manager),
             validateSQl(db=self.db_manager),
             executeSQL(db=self.db_manager),
         ]
@@ -80,30 +79,29 @@ class TextSQLAgent:
 
         # 5. 创建 Agent
         self.agent_executor = self._create_agent(
-            max_iterations=max_iterations,
-            verbose=verbose,
+            max_iterations=max_iterations
         )
         logger.info("TextSQLAgent 初始化完成")
 
-    def _create_agent(self, max_iterations: int = 20, verbose: bool = True) -> CompiledStateGraph:
+    def _create_agent(self, max_iterations: int = 20) -> CompiledStateGraph:
         """
         创建 ReAct 模式的 Agent。
         - max_iterations: 最大迭代次数（防止无限循环）
         - verbose: 是否打印每一步的详细信息
         """
 
-        def _handle_parsing_error(error: Exception) -> str:
-            """
-            自定义解析错误处理器。当 LLM 输出的 Action Input 不是合法 JSON 时：
-            尝试从原始文本中提取参数内容，作为提示反馈给 LLM，让它下次正确输出。
-            """
-            err_str = str(error)
-            # 提取 LLM 的原始输出（通常包含在错误信息中）
-            hint = "请严格按以下格式输出，不要省略 JSON 括号和引号："
-            hint += "\n  Action: executeSQL"
-            hint += '\n  Action Input: {"sql": "SELECT ... FROM ..."}'
-            hint += "\n\n切记：Action Input 必须是合法的 JSON 对象，包含 'sql' 字段。"
-            return hint
+        # def _handle_parsing_error(error: Exception) -> str:
+        #     """
+        #     自定义解析错误处理器。当 LLM 输出的 Action Input 不是合法 JSON 时：
+        #     尝试从原始文本中提取参数内容，作为提示反馈给 LLM，让它下次正确输出。
+        #     """
+        #     err_str = str(error)
+        #     # 提取 LLM 的原始输出（通常包含在错误信息中）
+        #     hint = "请严格按以下格式输出，不要省略 JSON 括号和引号："
+        #     hint += "\n  Action: executeSQL"
+        #     hint += '\n  Action Input: {"sql": "SELECT ... FROM ..."}'
+        #     hint += "\n\n切记：Action Input 必须是合法的 JSON 对象，包含 'sql' 字段。"
+        #     return hint
 
         agent_executor = create_agent(
             model=self.llm,
@@ -154,7 +152,7 @@ class TextSQLAgent:
             # 收集关键信息
             if tool_name == 'executeSQL':
                 sql_results.append((tool_input, str(observation)))
-            elif tool_name == 'queryDBTables':
+            elif tool_name == 'QueryDBTables':
                 table_info.append(str(observation))
 
         lines.append("")

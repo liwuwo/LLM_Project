@@ -100,17 +100,17 @@ def normalize_table_name_input(table_name):
     return str(raw).strip()
 
 
-class queryDBTablesModel(BaseModel):
+class QueryDBTablesModel(BaseModel):
     """查询数据库中所有的表名和各个表的备注信息，不需要任何参数。直接调用即可返回所有表的列表。"""
     # 保留一个可选字段以防止 BaseTool 在没有字段时出错
     dummy: str | None = Field(default=None, description="占位字段，不需要填写，可以省略")
 
 
-class queryDBTables(BaseTool):
+class QueryDBTables(BaseTool):
     """
     文本转SQL工具类
     """
-    name: str = "queryDBTables"
+    name: str = "QueryDBTables"
 
     description: str = (
         "当你不知道数据库中有哪些表时调用此工具。"
@@ -119,7 +119,7 @@ class queryDBTables(BaseTool):
 
     db: MysqlDataBaseManager
 
-    args_schema: type[BaseModel] = queryDBTablesModel
+    args_schema: type[BaseModel] = QueryDBTablesModel
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -145,7 +145,7 @@ class queryDBTables(BaseTool):
         return self._run(dummy=dummy)
 
 
-class queryDBColumnsModel(BaseModel):
+class QueryDBColumnsModel(BaseModel):
     table_name: str | list[str] | None = Field(
         default=None,
         description=(
@@ -155,18 +155,18 @@ class queryDBColumnsModel(BaseModel):
     )
 
 
-class queryTablesStructure(BaseTool):
+class QueryTablesStructure(BaseTool):
     """
     查询数据库表结构
     """
-    name: str = "queryTablesStructure"
+    name: str = "QueryTablesStructure"
     description: str = (
         "当你想了解某个或某些表的字段、主键、外键、索引等信息时调用此工具。"
         "输入参数 table_name 可以是表名字符串、表名列表或省略（省略时返回所有表的结构）。"
         "返回每个表的完整结构信息（字段列表、字段类型、是否允许为空、主键、外键、索引等）。"
     )
     db: MysqlDataBaseManager
-    args_schema: type[BaseModel] = queryDBColumnsModel
+    args_schema: type[BaseModel] = QueryDBColumnsModel
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -461,5 +461,5 @@ if __name__ == '__main__':
     from db.config import DATABASE_URL
 
     db_manager = MysqlDataBaseManager(DATABASE_URL)
-    tool = queryTablesStructure(db=db_manager)
+    tool = QueryTablesStructure(db=db_manager)
     print(tool.invoke({'table_name': ['order_items', 'orders']}))

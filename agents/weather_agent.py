@@ -5,7 +5,7 @@ from langgraph.graph.state import CompiledStateGraph
 from llm.llms import deepseek_llm, local_llm
 from utils.constants import WEATHER_PROMPT
 from utils.logUtils import logger
-from tools.weather_tools import queryWeather
+from tools.weather_tools import QueryRealTimeWeather, QueryFuture7dWeather
 
 
 class WeatherAgent:
@@ -29,11 +29,13 @@ class WeatherAgent:
             f"使用 LLM 模型: {'本地模型' if use_local_llm else 'DeepSeek 云端模型'} "
             f"(model={model!r}, base_url={base_url!r})"
         )
-        self.tools = [queryWeather()]
+        self.tools = [
+            QueryRealTimeWeather(),
+            QueryFuture7dWeather(),
+        ]
         self.agent_executor = self._create_agent(max_iterations)
 
     def _create_agent(self, max_iterations: int = 20) -> CompiledStateGraph:
-        """创建 ReAct 模式的 Agent。"""
         agent_executor = create_agent(
             model=self.llm,
             tools=self.tools,
@@ -44,6 +46,10 @@ class WeatherAgent:
                 ToolRetryMiddleware(max_retries=3)
             ]
         )
+        """
+        创建 ReAct 模式的 Agent。
+        - max_iterations: 最大迭代次数（防止死循环）
+        """
         return agent_executor
 
     def _extract_city_by_llm(self, question: str) -> str:
@@ -126,7 +132,7 @@ class WeatherAgent:
 
     def query(self, question: dict) -> dict:
         """
-        执行天气查询（保持原有 Agent 框架调用逻辑）。
+        执行天气查询。
         :param question: 用户的天气查询问题
         :return: 包含查询结果、中间步骤、成功标记的字典
         """
