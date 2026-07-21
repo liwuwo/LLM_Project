@@ -28,7 +28,7 @@ class TextSQLAgent:
 
     def __init__(
             self,
-            use_local_llm: bool = False,
+            use_local_llm: bool = True,
             max_iterations: int = 20,
     ):
         """

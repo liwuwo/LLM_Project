@@ -1,5 +1,5 @@
 from langchain.agents import create_agent
-from langchain.agents.middleware import ModelCallLimitMiddleware, ToolRetryMiddleware
+from langchain.agents.middleware import ModelCallLimitMiddleware, ToolRetryMiddleware, SummarizationMiddleware
 from langgraph.graph.state import CompiledStateGraph
 
 from llm.llms import deepseek_llm, local_llm
@@ -16,7 +16,7 @@ class WeatherAgent:
 
     def __init__(
             self,
-            use_local_llm: bool = False,
+            use_local_llm: bool = True,
             max_iterations: int = 20):
         """
         :param use_local_llm:   是否使用本地 LLM 模型，默认使用 DeepSeek 云端模型
@@ -42,6 +42,14 @@ class WeatherAgent:
             system_prompt=WEATHER_PROMPT.replace("\\n", "\n"),
             response_format=None,
             middleware=[
+                SummarizationMiddleware(
+                    model=self.llm,
+                    trigger=[
+                        ("tokens", 200),
+                        ("messages", 5)
+                    ],
+                    keep=("messages",3)
+                ),
                 ModelCallLimitMiddleware(run_limit=max_iterations),
                 ToolRetryMiddleware(max_retries=3)
             ]
@@ -111,9 +119,7 @@ class WeatherAgent:
 
         response = self.llm.invoke(prompt)
         content = str(response.content).strip() if hasattr(response, 'content') else str(response).strip()
-
-        logger.info(f"LLM 分析天气问题结果: {content}")
-
+        logger.info(f"analyze_weather_question 分析天气问题结果: {content}")
         # 解析 JSON 结果
         import json
         try:

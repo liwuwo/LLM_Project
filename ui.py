@@ -1,13 +1,13 @@
 import gradio as gr
 import os
 import base64
-from llm.llms import deepseek_llm
+from llm.llms import deepseek_llm, local_llm
 from agents.text_SQL_agent import TextSQLAgent
 from utils.constants import USE_LOCAL_LLM
 from agents.weather_agent import WeatherAgent
 from utils.logUtils import logger
 
-currentLLM = deepseek_llm
+currentLLM = local_llm
 
 # 初始化 TextSQLAgent（懒加载，首次使用时才创建）
 _sql_agent = None
@@ -88,7 +88,6 @@ with gr.Blocks(title="LLM助手") as demo:
                 # 通过 LLM 分析用户问题，判断是否为天气问题并提取相关信息
                 weather_agent = get_weather_agent()
                 analysis_result = weather_agent.analyze_weather_question(message)
-                
                 is_weather = analysis_result.get('is_weather', False)
                 city = analysis_result.get('city', '')
                 district = analysis_result.get('district', '')

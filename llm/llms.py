@@ -12,8 +12,8 @@ deepseek_llm = ChatOpenAI(
     api_key=DEEPSEEK_API_KEY,
     base_url=DEEPSEEK_BASE_URL,
     temperature=0.2,
-    timeout=30,           # 单请求 30 秒超时（防止 RemoteProtocolError 卡死对话）
-    max_retries=3,       # 自动重试 3 次（指数退避）
+    timeout=30,  # 单请求 30 秒超时（防止 RemoteProtocolError 卡死对话）
+    max_retries=3,  # 自动重试 3 次（指数退避）
 )
 
 # 本地部署的 Qwen3.6 模型（vLLM 服务）
@@ -22,6 +22,9 @@ local_llm = ChatOpenAI(
     api_key="EMPTY",
     base_url="http://127.0.0.1:8000/v1",
     temperature=0.1,
-    timeout=60,          # 本地模型首请求可能较长，给更多时间
+    timeout=60,  # 本地模型首请求可能较长，给更多时间
     max_retries=2,
+    extra_body={
+        "chat_template_kwargs": {"enable_thinking": False}
+    }
 )
