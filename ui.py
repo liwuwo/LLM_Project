@@ -27,7 +27,7 @@ def get_sql_agent():
     global _sql_agent
 
     if _sql_agent is None:
-        _sql_agent = TextSQLAgent(use_local_llm=USE_LOCAL_LLM, max_iterations=15, verbose=False)
+        _sql_agent = TextSQLAgent(use_local_llm=USE_LOCAL_LLM, max_iterations=15, verbose=True)
     return _sql_agent
 
 
@@ -93,7 +93,8 @@ with gr.Blocks(title="LLM助手") as demo:
                 district = analysis_result.get('district', '')
                 weather_indices = analysis_result.get('weather_indices', [])
 
-                logger.info(f"天气问题分析结果: is_weather={is_weather}, city={city}, district={district}, indices={weather_indices}")
+                logger.info(
+                    f"天气问题分析结果: is_weather={is_weather}, city={city}, district={district}, indices={weather_indices}")
 
                 if is_weather:
 

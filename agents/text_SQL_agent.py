@@ -28,8 +28,9 @@ class TextSQLAgent:
 
     def __init__(
             self,
-            use_local_llm: bool = True,
+            use_local_llm: bool = False,
             max_iterations: int = 20,
+            verbose: bool = True
     ):
         """
         初始化 Text-to-SQL Agent
@@ -79,47 +80,41 @@ class TextSQLAgent:
 
         # 5. 创建 Agent
         self.agent_executor = self._create_agent(
-            max_iterations=max_iterations
+            max_iterations=max_iterations,
+            verbose=verbose
         )
         logger.info("TextSQLAgent 初始化完成")
 
-    def _create_agent(self, max_iterations: int = 20) -> CompiledStateGraph:
+    def _create_agent(self, max_iterations: int = 20, verbose: bool = True) -> AgentExecutor:
         """
         创建 ReAct 模式的 Agent。
         - max_iterations: 最大迭代次数（防止无限循环）
         - verbose: 是否打印每一步的详细信息
         """
 
-        # def _handle_parsing_error(error: Exception) -> str:
-        #     """
-        #     自定义解析错误处理器。当 LLM 输出的 Action Input 不是合法 JSON 时：
-        #     尝试从原始文本中提取参数内容，作为提示反馈给 LLM，让它下次正确输出。
-        #     """
-        #     err_str = str(error)
-        #     # 提取 LLM 的原始输出（通常包含在错误信息中）
-        #     hint = "请严格按以下格式输出，不要省略 JSON 括号和引号："
-        #     hint += "\n  Action: executeSQL"
-        #     hint += '\n  Action Input: {"sql": "SELECT ... FROM ..."}'
-        #     hint += "\n\n切记：Action Input 必须是合法的 JSON 对象，包含 'sql' 字段。"
-        #     return hint
+        def _handle_parsing_error(error: Exception) -> str:
+            """
+            自定义解析错误处理器。当 LLM 输出的 Action Input 不是合法 JSON 时：
+            尝试从原始文本中提取参数内容，作为提示反馈给 LLM，让它下次正确输出。
+            """
+            err_str = str(error)
+            # 提取 LLM 的原始输出（通常包含在错误信息中）
+            hint = "请严格按以下格式输出，不要省略 JSON 括号和引号："
+            hint += "\n  Action: executeSQL"
+            hint += '\n  Action Input: {"sql": "SELECT ... FROM ..."}'
+            hint += "\n\n切记：Action Input 必须是合法的 JSON 对象，包含 'sql' 字段。"
+            return hint
 
-        agent_executor = create_agent(
-            model=self.llm,
+        agent_executor = initialize_agent(
             tools=self.tools,
-            system_prompt=AGENT_PROMPT.replace("\\n", "\n"),
-            response_format=None,
-            middleware=[
-                ModelCallLimitMiddleware(run_limit=max_iterations),
-                ToolRetryMiddleware(max_retries=3)
-            ]
-
-            # agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-            # verbose=verbose,
-            # max_iterations=max_iterations,
-            # max_execution_time=120,
-            # early_stopping_method="generate",
-            # handle_parsing_errors=_handle_parsing_error,
-            # return_intermediate_steps=True,
+            llm=self.llm,
+            agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+            verbose=verbose,
+            max_iterations=max_iterations,
+            max_execution_time=120,
+            early_stopping_method="generate",
+            handle_parsing_errors=_handle_parsing_error,
+            return_intermediate_steps=True,
         )
         return agent_executor
 
@@ -547,18 +542,17 @@ class TextSQLAgent:
 
 # 使用示例
 if __name__ == '__main__':
-    # agent = TextSQLAgent(use_local_llm=False)
-    #
-    # test_questions = [
-    #
-    #     "查询哪些会员购买了商品，具体的商品单价和总消费金额是多少"
-    # ]
-    #
-    # for question in test_questions:
-    #     print('\n' + '=' * 80)
-    #     print(f"问题: {question}")
-    #     print('=' * 80)
-    #     answer = agent.query_simple(question)
-    #     print(f"\n答案:\n{answer}")
-    #     print('\n')
-    print(AGENT_PROMPT)
+    agent = TextSQLAgent(use_local_llm=False)
+
+    test_questions = [
+
+        "查询哪些会员购买了商品，具体的商品单价和总消费金额是多少"
+    ]
+
+    for question in test_questions:
+        print('\n' + '=' * 80)
+        print(f"问题: {question}")
+        print('=' * 80)
+        answer = agent.query_simple(question)
+        print(f"\n答案:\n{answer}")
+        print('\n')

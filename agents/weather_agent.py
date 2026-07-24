@@ -1,7 +1,11 @@
 from langchain.agents import create_agent
-from langchain.agents.middleware import ModelCallLimitMiddleware, ToolRetryMiddleware, SummarizationMiddleware
+from langchain.agents.middleware import ModelCallLimitMiddleware, ToolRetryMiddleware, SummarizationMiddleware, \
+    PIIMiddleware
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
 from langgraph.graph.state import CompiledStateGraph
 
+from db.config import DATABASE_URL
 from llm.llms import deepseek_llm, local_llm
 from utils.constants import WEATHER_PROMPT
 from utils.logUtils import logger
@@ -16,7 +20,7 @@ class WeatherAgent:
 
     def __init__(
             self,
-            use_local_llm: bool = True,
+            use_local_llm: bool = False,
             max_iterations: int = 20):
         """
         :param use_local_llm:   是否使用本地 LLM 模型，默认使用 DeepSeek 云端模型
@@ -36,9 +40,12 @@ class WeatherAgent:
         self.agent_executor = self._create_agent(max_iterations)
 
     def _create_agent(self, max_iterations: int = 20) -> CompiledStateGraph:
+        with PyMySQLSaver.from_conn_string(DATABASE_URL) as checkpoint:
+            checkpoint.setup()
         agent_executor = create_agent(
             model=self.llm,
             tools=self.tools,
+            checkpointer=checkpoint,
             system_prompt=WEATHER_PROMPT.replace("\\n", "\n"),
             response_format=None,
             middleware=[
@@ -48,7 +55,7 @@ class WeatherAgent:
                         ("tokens", 200),
                         ("messages", 5)
                     ],
-                    keep=("messages",3)
+                    keep=("messages", 3)
                 ),
                 ModelCallLimitMiddleware(run_limit=max_iterations),
                 ToolRetryMiddleware(max_retries=3)
@@ -152,7 +159,15 @@ class WeatherAgent:
         try:
             logger.info(f"收到天气查询请求: {messages}")
             # 使用 Agent 框架执行查询（保持原有逻辑）
-            result = self.agent_executor.invoke({'messages': messages})
+            configurable: RunnableConfig = {
+                "configurable": {
+                    "thread_id": "1"
+                }
+            }
+            result = self.agent_executor.invoke(
+                {'messages': messages},
+                config=configurable
+            )
 
             logger.info(f"Agent 原始响应类型: {type(result)}")
             logger.info(f"Agent 原始响应内容: {result}")
@@ -225,3 +240,15 @@ class WeatherAgent:
                 'answer': f"查询执行失败：{str(e)}",
                 'intermediate_steps': [],
             }
+
+
+if __name__ == "__main__":
+    create_agent(
+        model=deepseek_llm,
+        tools=[],
+        middleware=[
+            PIIMiddleware(),
+            ModelCallLimitMiddleware(run_limit=20),
+            ToolRetryMiddleware(max_retries=3)
+        ]
+    )
