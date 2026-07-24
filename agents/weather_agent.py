@@ -5,7 +5,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
 from langgraph.graph.state import CompiledStateGraph
 
-from db.config import DATABASE_URL
+from db.config import DATABASE_WEATHER_URL
 from llm.llms import deepseek_llm, local_llm
 from utils.constants import WEATHER_PROMPT
 from utils.logUtils import logger
@@ -37,15 +37,37 @@ class WeatherAgent:
             QueryRealTimeWeather(),
             QueryFuture7dWeather(),
         ]
+        # 初始化 checkpoint（保持连接打开）
+        self._checkpoint_ctx = None
+        self._create_checkpoint()
         self.agent_executor = self._create_agent(max_iterations)
 
+    def _create_checkpoint(self):
+        """创建并保持 checkpoint 连接"""
+        try:
+            self._checkpoint_ctx = PyMySQLSaver.from_conn_string(DATABASE_WEATHER_URL)
+            self.checkpoint = self._checkpoint_ctx.__enter__()
+            self.checkpoint.setup()
+            logger.info("成功连接到天气数据库 checkpoint")
+        except Exception as e:
+            logger.warning(f"无法连接到天气数据库 checkpoint: {e}，将不使用持久化")
+            self._checkpoint_ctx = None
+            self.checkpoint = None
+
+    def __del__(self):
+        """清理 checkpoint 连接"""
+        if self._checkpoint_ctx is not None:
+            try:
+                self._checkpoint_ctx.__exit__(None, None, None)
+                logger.info("已关闭天气数据库 checkpoint 连接")
+            except Exception as e:
+                logger.warning(f"关闭 checkpoint 连接时出错: {e}")
+
     def _create_agent(self, max_iterations: int = 20) -> CompiledStateGraph:
-        with PyMySQLSaver.from_conn_string(DATABASE_URL) as checkpoint:
-            checkpoint.setup()
         agent_executor = create_agent(
             model=self.llm,
             tools=self.tools,
-            checkpointer=checkpoint,
+            checkpointer=self.checkpoint,
             system_prompt=WEATHER_PROMPT.replace("\\n", "\n"),
             response_format=None,
             middleware=[
@@ -243,12 +265,6 @@ class WeatherAgent:
 
 
 if __name__ == "__main__":
-    create_agent(
-        model=deepseek_llm,
-        tools=[],
-        middleware=[
-            PIIMiddleware(),
-            ModelCallLimitMiddleware(run_limit=20),
-            ToolRetryMiddleware(max_retries=3)
-        ]
-    )
+    weather_agent = WeatherAgent()
+    result = weather_agent.query("后天的天气怎么样？")
+    print(result)

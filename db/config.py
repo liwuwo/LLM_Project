@@ -9,7 +9,7 @@ MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3306"))
 MYSQL_USER = os.getenv("MYSQL_USER", "root")
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
 MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "lww_schema_test")
-
+MYSQL_WEATHER_DATABASE = os.getenv("MYSQL_WEATHER_DATABASE", "lww_schema_weather")
 # 构建 SQLAlchemy 数据库 URL
 DATABASE_URL = f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}?charset=utf8mb4"
-
+DATABASE_WEATHER_URL = f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_WEATHER_DATABASE}?charset=utf8mb4"
