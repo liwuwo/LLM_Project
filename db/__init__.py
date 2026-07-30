@@ -1,1 +1,2 @@
 # Database module
+from db.connection_manager import WeatherDBConnectionManager, get_weather_db_manager

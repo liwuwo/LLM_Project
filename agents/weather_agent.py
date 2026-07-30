@@ -1,23 +1,34 @@
-from langchain.agents import create_agent
+from langgraph.runtime import Runtime
+from langchain.agents import create_agent, AgentState
 from langchain.agents.middleware import ModelCallLimitMiddleware, ToolRetryMiddleware, SummarizationMiddleware, \
-    PIIMiddleware
+    PIIMiddleware, before_model, before_agent, wrap_tool_call
+from langchain.messages import RemoveMessage
 from langchain_core.runnables import RunnableConfig
-from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.graph.state import CompiledStateGraph
 
-from db.config import DATABASE_WEATHER_URL
+from db.connection_manager import get_weather_db_manager
 from llm.llms import deepseek_llm, local_llm
+from middleware.weather_middleware import WeatherMiddleware
 from utils.constants import WEATHER_PROMPT
 from utils.logUtils import logger
-from tools.weather_tools import QueryRealTimeWeather, QueryFuture7dWeather
+from tools.weather_tools import QueryRealTimeWeather, QueryFuture7dWeather, weather_locationId_memory_middleware
 
+
+@before_model
+def trim_messages(state: AgentState, runtime: Runtime) -> dict[str, list] | None:
+    messages = state["messages"]
+
+    return {"messages": [
+        RemoveMessage(id=REMOVE_ALL_MESSAGES),
+        *messages[-4:]
+    ]}
 
 class WeatherAgent:
     """
     天气查询智能体
     能够通过理解用户对天气方面的问题，调用天气查询工具返回结果。
     """
-
     def __init__(
             self,
             use_local_llm: bool = False,
@@ -45,7 +56,7 @@ class WeatherAgent:
     def _create_checkpoint(self):
         """创建并保持 checkpoint 连接"""
         try:
-            self._checkpoint_ctx = PyMySQLSaver.from_conn_string(DATABASE_WEATHER_URL)
+            self._checkpoint_ctx = get_weather_db_manager
             self.checkpoint = self._checkpoint_ctx.__enter__()
             self.checkpoint.setup()
             logger.info("成功连接到天气数据库 checkpoint")
@@ -64,6 +75,7 @@ class WeatherAgent:
                 logger.warning(f"关闭 checkpoint 连接时出错: {e}")
 
     def _create_agent(self, max_iterations: int = 20) -> CompiledStateGraph:
+        weather_middleware = WeatherMiddleware()
         agent_executor = create_agent(
             model=self.llm,
             tools=self.tools,
@@ -71,6 +83,8 @@ class WeatherAgent:
             system_prompt=WEATHER_PROMPT.replace("\\n", "\n"),
             response_format=None,
             middleware=[
+                trim_messages,
+                weather_middleware.weather_locationId_memory_middleware,
                 SummarizationMiddleware(
                     model=self.llm,
                     trigger=[
@@ -266,5 +280,5 @@ class WeatherAgent:
 
 if __name__ == "__main__":
     weather_agent = WeatherAgent()
-    result = weather_agent.query("后天的天气怎么样？")
+    result = weather_agent.query("北京今天的天气怎么样？")
     print(result)

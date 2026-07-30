@@ -1,12 +1,40 @@
 from typing import Any
 
+from langchain.agents.middleware import wrap_tool_call
 from langchain.tools import BaseTool
 import json
+
+from langchain_core.messages import ToolMessage
+from langgraph.types import Command
 from pydantic import BaseModel, Field
 import requests
 from utils.constants import QWEATHER_BASE_URL, QWEATHER_API_KEY
 from utils.logUtils import logger
 from rich import print as rprint
+from langgraph.prebuilt.tool_node import ToolCallRequest
+from collections.abc import Callable
+
+
+@wrap_tool_call
+def weather_locationId_memory_middleware(request: ToolCallRequest, handler: Callable[
+    [ToolCallRequest], ToolMessage | Command[Any]]) -> ToolMessage | Command[Any]:
+    # logger.info(state, runtime)
+    tool_call = request.tool_call
+    args = tool_call.get("args", {})
+    args["location_id"] = "101190101"
+    logger.info(f"tool_call: {tool_call}")
+
+    new_tool_call: Any = {
+        **tool_call,
+        "args": args
+    }
+    logger.info(f"new_tool_call: {new_tool_call}")
+    new_request = request.override(tool_call=new_tool_call)
+
+    request.tool_call["args"]["location_id"] = "101190101"
+
+    
+    return handler(new_request)
 
 
 class WeatherApi:
@@ -109,17 +137,16 @@ class WeatherApi:
             return None
 
     @staticmethod
-    def get_Qweather_info(url: str, city: str, district: str | None = None) -> Any:
+    def get_Qweather_info(location_id: str, url: str) -> Any:
         """
         获取天气信息
-        :param city: 城市名称
-        :param district: 区县名称
+        :param location_id: 城市 location ID
+        :param url: API 路径
         :return: 天气信息
         """
         # 1. 通过 GeoAPI 将城市/区县名称转换为 location ID
-        location_id = WeatherApi._get_location_id(city, district)
         if not location_id:
-            return f"[查询失败] 无法找到 {city} {district or ''} 对应的地区编码。"
+            return f"[查询失败] 无法找到 {location_id} 对应的地区编码。"
 
         # 2. 调用和风天气实时天气接口
         headers = {
@@ -209,6 +236,13 @@ class QueryRealTimeWeatherModel(BaseModel):
             "区县名称如果为空，则查询该城市的所有区县天气信息。"
         )
     )
+    location_id: str = Field(
+        ...,
+        description=(
+            "要查询的 location ID。"
+            "如果指定了 location ID，则忽略城市和区县名称。"
+        )
+    )
 
 
 class QueryRealTimeWeather(BaseTool):
@@ -217,8 +251,8 @@ class QueryRealTimeWeather(BaseTool):
     """
     name: str = "QueryRealTimeWeather"
     description: str = (
-        "根据城市和区县查询实时天气信息。"
-        "城市名称为必填项，区县名称为可选项。"
+        "根据城市location_id查询实时天气信息。"
+        "location_id 为必填项。"
     )
     url: str = "/v7/weather/now"
     args_schema: type[BaseModel] = QueryRealTimeWeatherModel
@@ -226,10 +260,10 @@ class QueryRealTimeWeather(BaseTool):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-    def _run(self, city: str, district: str | None = None) -> str:
-        logger.info(f"####_run 查询 {city} {district or ''} 的天气信息####")
+    def _run(self, location_id: str, city: str, district: str | None = None) -> str:
+        logger.info(f"####_run 查询 {city} {district or ''}--{location_id} 的天气信息####")
         try:
-            res = WeatherApi.get_Qweather_info(self.url, city, district)
+            res = WeatherApi.get_Qweather_info(location_id, self.url)
             data = res.get("now")
             result = json.dumps(data, ensure_ascii=False, indent=2)
             # 解析 JSON 数据
@@ -245,8 +279,8 @@ class QueryRealTimeWeather(BaseTool):
             logger.exception(f"查询实时天气信息失败: {e}")
             return f"[查询失败] 实时天气信息查询出错。错误信息: {str(e)}"
 
-    async def _arun(self, city: str, district: str | None = None) -> str:
-        return self._run(city=city, district=district)
+    async def _arun(self, location_id: str, city: str, district: str | None = None) -> str:
+        return self._run(location_id, city, district)
 
 
 class QueryFutureWeatherModel(BaseModel):
@@ -256,6 +290,13 @@ class QueryFutureWeatherModel(BaseModel):
         description=(
             "要查询的区县名称。"
             "区县名称如果为空，则查询该城市的所有区县天气信息。"
+        )
+    )
+    location_id: str = Field(
+        ...,
+        description=(
+            "要查询的 location ID。"
+            "如果指定了 location ID，则忽略城市和区县名称。"
         )
     )
 
@@ -275,10 +316,10 @@ class QueryFuture7dWeather(BaseTool):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-    def _run(self, city: str, district: str | None = None) -> str:
-        logger.info(f"####_run 查询 {city} {district or ''} 的未来7天天气预报信息####")
+    def _run(self, location_id: str, city: str, district: str | None = None) -> str:
+        logger.info(f"####_run 查询 {city} {district or ''}--{location_id} 的未来7天天气预报信息####")
         try:
-            res = WeatherApi.get_Qweather_info(self.url, city, district)
+            res = WeatherApi.get_Qweather_info(location_id, self.url)
             data = res.get("daily")
             result = json.dumps(data, ensure_ascii=False, indent=2)
             # 解析 JSON 数据
@@ -294,8 +335,8 @@ class QueryFuture7dWeather(BaseTool):
             logger.exception(f"查询未来7天天气预报信息失败: {e}")
             return f"[查询失败] 未来7天天气预报信息查询出错。错误信息: {str(e)}"
 
-    async def _arun(self, city: str, district: str | None = None) -> str:
-        return self._run(city=city, district=district)
+    async def _arun(self, location_id: str, city: str, district: str | None = None) -> str:
+        return self._run(location_id, city, district)
 
 
 if __name__ == '__main__':
@@ -305,4 +346,4 @@ if __name__ == '__main__':
     # tool = QueryTablesStructure(db=db_manager)
     # print(tool.invoke({'table_name': ['order_items', 'orders']}))
     tool = QueryRealTimeWeather(city="南京")
-    rprint(tool._run(city="南京", district="江宁区"))
+    rprint(WeatherApi._get_location_id("南京"))
