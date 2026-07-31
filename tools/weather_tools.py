@@ -105,7 +105,7 @@ class WeatherApi:
             return obj
 
     @staticmethod
-    def _get_location_id(city: str, district: str | None = None) -> str | None:
+    def get_location_id(city: str, district: str | None = None) -> str | None:
         """
         通过和风天气 GeoAPI 将城市/区县名称转换为 location ID。
         :param city: 城市名称
@@ -345,5 +345,5 @@ if __name__ == '__main__':
     # db_manager = MysqlDataBaseManager(DATABASE_URL)
     # tool = QueryTablesStructure(db=db_manager)
     # print(tool.invoke({'table_name': ['order_items', 'orders']}))
-    tool = QueryRealTimeWeather(city="南京")
-    rprint(WeatherApi._get_location_id("南京"))
+    tool = QueryRealTimeWeather()
+    rprint(WeatherApi.get_location_id("当涂"))

@@ -12,7 +12,7 @@ from llm.llms import deepseek_llm, local_llm
 from middleware.weather_middleware import WeatherMiddleware
 from utils.constants import WEATHER_PROMPT
 from utils.logUtils import logger
-from tools.weather_tools import QueryRealTimeWeather, QueryFuture7dWeather, weather_locationId_memory_middleware
+from tools.weather_tools import QueryRealTimeWeather, QueryFuture7dWeather
 
 
 @before_model
@@ -24,11 +24,13 @@ def trim_messages(state: AgentState, runtime: Runtime) -> dict[str, list] | None
         *messages[-4:]
     ]}
 
+
 class WeatherAgent:
     """
     天气查询智能体
     能够通过理解用户对天气方面的问题，调用天气查询工具返回结果。
     """
+
     def __init__(
             self,
             use_local_llm: bool = False,
@@ -54,25 +56,16 @@ class WeatherAgent:
         self.agent_executor = self._create_agent(max_iterations)
 
     def _create_checkpoint(self):
-        """创建并保持 checkpoint 连接"""
+        """通过单例 WeatherDBConnectionManager 获取 checkpoint 连接"""
         try:
-            self._checkpoint_ctx = get_weather_db_manager
-            self.checkpoint = self._checkpoint_ctx.__enter__()
-            self.checkpoint.setup()
-            logger.info("成功连接到天气数据库 checkpoint")
-        except Exception as e:
-            logger.warning(f"无法连接到天气数据库 checkpoint: {e}，将不使用持久化")
+            conn_mgr = get_weather_db_manager()
+            self.checkpoint = conn_mgr.get_checkpoint()
+            # 注意：checkpoint/store 的连接生命周期由单例统一管理（含 atexit 关闭），
+            # WeatherAgent 不再单独维护 ctx，避免提前关闭影响 WeatherMiddleware 等共享方。
+            self._checkpoint_ctx = None
+        except Exception:
             self._checkpoint_ctx = None
             self.checkpoint = None
-
-    def __del__(self):
-        """清理 checkpoint 连接"""
-        if self._checkpoint_ctx is not None:
-            try:
-                self._checkpoint_ctx.__exit__(None, None, None)
-                logger.info("已关闭天气数据库 checkpoint 连接")
-            except Exception as e:
-                logger.warning(f"关闭 checkpoint 连接时出错: {e}")
 
     def _create_agent(self, max_iterations: int = 20) -> CompiledStateGraph:
         weather_middleware = WeatherMiddleware()
@@ -84,7 +77,7 @@ class WeatherAgent:
             response_format=None,
             middleware=[
                 trim_messages,
-                weather_middleware.weather_locationId_memory_middleware,
+                weather_middleware,
                 SummarizationMiddleware(
                     model=self.llm,
                     trigger=[
@@ -103,28 +96,30 @@ class WeatherAgent:
         """
         return agent_executor
 
-    def _extract_city_by_llm(self, question: str) -> str:
-        """通过 LLM 分析用户问题，提取城市名称"""
-        prompt = f"""
-        请分析用户的问题，提取其中提到的城市名称。
-        
-        用户问题：{question}
-        
-        要求：
-        1. 如果问题中明确提到了城市名称（如北京、上海、南京等），请直接返回该城市名称
-        2. 如果问题中没有提到城市名称，返回空字符串
-        3. 只返回城市名称，不要返回其他内容
-        
-        示例：
-        用户问题："北京今天天气怎么样？" → 返回：北京
-        用户问题："明天会下雨吗？" → 返回：（空）
+    @staticmethod
+    def _normalize_location_suffix(city: str, district: str) -> tuple[str, str]:
         """
+        代码兜底：规范化城市、区县级行政单位后缀。
+        - 城市：移除城市名称中的"市"后缀（如"北京市" -> "北京"）
+        - 区县：移除区县名称中的"区"后缀（如"海淀区" -> "海淀"，如"当涂县" -> "当涂"）
+        提示词层之后的强保障，保证输出规则 100% 一致。
+        """
+        CITY_LEGAL_SUFFIXES = ("特别行政区", "自治区", "自治州", "市", "省", "盟")
+        DISTRICT_LEGAL_SUFFIXES = ("自治县", "林区", "特区", "市", "区", "县", "旗")
 
-        response = self.llm.invoke(prompt)
-        city = str(response.content).strip() if hasattr(response, 'content') else str(response).strip()
+        def _strip_suffix(s: str, suffixes: tuple[str, ...]) -> str:
+            text = s.strip() if s else ""
+            if not text:
+                return ""
+            for suf in suffixes:
+                if text.endswith(suf):
+                    return text[: -len(suf)]
+            return text
 
-        logger.info(f"LLM 提取城市结果: '{city}'")
-        return city
+        norm_city = _strip_suffix(city, CITY_LEGAL_SUFFIXES)
+        norm_district = _strip_suffix(district, DISTRICT_LEGAL_SUFFIXES)
+
+        return norm_city, norm_district
 
     def analyze_weather_question(self, question: str) -> dict:
         """
@@ -146,8 +141,8 @@ class WeatherAgent:
         输出格式（JSON）：
         {{
             "is_weather": true/false,
-            "city": "城市名称",
-            "district": "区县名称（未提及则为空字符串）",
+            "city": "城市名称（必须后缀要为“市”，如：北京市，上海市，帮我标识清楚）",
+            "district": "区县名称（未提及则为空字符串，如果提及，必须后缀要为“区县”写清楚，如：朝阳区，当涂县，帮我标识清楚）",
             "weather_indices": ["指标1", "指标2", ...],
             "reason": "判断理由"
         }}
@@ -176,7 +171,13 @@ class WeatherAgent:
                 "weather_indices": [],
                 "reason": "解析失败"
             }
-
+        raw_city = str(result.get("city", "") or "")
+        raw_district = str(result.get("district", "") or "")
+        norm_city, norm_district = WeatherAgent._normalize_location_suffix(raw_city, raw_district)
+        if norm_city != raw_city or norm_district != raw_district:
+            logger.info(f"行政后缀规范化：city {raw_city!r}→{norm_city!r}, district {raw_district!r}→{norm_district!r}")
+        result["city"] = norm_city
+        result["district"] = norm_district
         return result
 
     def query(self, question: dict) -> dict:
@@ -280,5 +281,11 @@ class WeatherAgent:
 
 if __name__ == "__main__":
     weather_agent = WeatherAgent()
-    result = weather_agent.query("北京今天的天气怎么样？")
+    result = weather_agent.query({
+        "is_weather": True,
+        "city": "苏州市",
+        "district": "昆山市",
+        "weather_indices": ["天气状况", "温度"],
+        "reason": "用户询问苏州昆山今天的天气情况"
+    })
     print(result)
