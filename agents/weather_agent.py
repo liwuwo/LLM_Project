@@ -81,7 +81,7 @@ class WeatherAgent:
                 SummarizationMiddleware(
                     model=self.llm,
                     trigger=[
-                        ("tokens", 200),
+                        ("tokens", 2000),
                         ("messages", 5)
                     ],
                     keep=("messages", 3)

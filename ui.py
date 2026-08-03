@@ -7,7 +7,7 @@ from utils.constants import USE_LOCAL_LLM
 from agents.weather_agent import WeatherAgent
 from utils.logUtils import logger
 
-currentLLM = local_llm
+currentLLM = local_llm if USE_LOCAL_LLM else deepseek_llm
 
 # 初始化 TextSQLAgent（懒加载，首次使用时才创建）
 _sql_agent = None
@@ -158,8 +158,20 @@ with gr.Blocks(title="LLM助手") as demo:
                 messages = [{"role": m["role"], "content": m["content"]} for m in chat_history[:-2]]
                 messages.append({"role": "user", "content": content})
 
-                for chunk in currentLLM.stream(messages):
-                    chat_history[-1]["content"] += chunk.content
+                try:
+                    for chunk in currentLLM.stream(messages):
+                        chat_history[-1]["content"] += chunk.content
+                        yield "", chat_history, None, None, None
+                except Exception as e:
+                    logger.exception(f"通用聊天 LLM 调用失败: {e}")
+                    error_msg = str(e)
+                    if "10061" in error_msg or "ConnectError" in error_msg or "Connection error" in error_msg:
+                        if USE_LOCAL_LLM:
+                            chat_history[-1]["content"] = "❌ 本地 LLM 服务未启动，请启动 vLLM 服务后重试，或在 .env 中设置 USE_LOCAL_LLM=False 使用云端模型。"
+                        else:
+                            chat_history[-1]["content"] = "❌ 云端 LLM 连接失败，请检查网络或 API 配置（.env 中的 DEEPSEEK_API_KEY/BASE_URL）。"
+                    else:
+                        chat_history[-1]["content"] = f"❌ 对话生成失败：{error_msg}"
                     yield "", chat_history, None, None, None
 
 

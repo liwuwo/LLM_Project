@@ -33,7 +33,6 @@ def weather_locationId_memory_middleware(request: ToolCallRequest, handler: Call
 
     request.tool_call["args"]["location_id"] = "101190101"
 
-    
     return handler(new_request)
 
 
@@ -320,6 +319,7 @@ class QueryFuture7dWeather(BaseTool):
         logger.info(f"####_run 查询 {city} {district or ''}--{location_id} 的未来7天天气预报信息####")
         try:
             res = WeatherApi.get_Qweather_info(location_id, self.url)
+            logger.info(f"### get_Qweather_info ### res: {res}")
             data = res.get("daily")
             result = json.dumps(data, ensure_ascii=False, indent=2)
             # 解析 JSON 数据
