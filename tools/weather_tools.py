@@ -163,6 +163,7 @@ class WeatherApi:
                 timeout=10,
             )
             resp.raise_for_status()
+            print("resp.json() = ", resp.json())
             return resp.json()
         except requests.RequestException as e:
             logger.exception(f"和风天气 API 请求失败: {e}")
@@ -346,4 +347,5 @@ if __name__ == '__main__':
     # tool = QueryTablesStructure(db=db_manager)
     # print(tool.invoke({'table_name': ['order_items', 'orders']}))
     tool = QueryRealTimeWeather()
-    rprint(WeatherApi.get_location_id("当涂"))
+    rprint(WeatherApi.get_location_id("南昌"))
+    rprint(tool.invoke({"location_id": "101240101", "city": "南昌"}))
